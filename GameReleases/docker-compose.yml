@@ -1,0 +1,56 @@
+services:
+  game-releases-api:
+    build:
+      context: .
+      dockerfile: GameReleases.WebApi/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__DefaultConnection=Host=postgres;Port=5432;Database=game_releases;Username=postgres;Password=1234
+      - ConnectionStrings__ClickHouseConnection=Host=clickhouse;Port=8123;Database=game_releases;Username=default;Password=
+    depends_on:
+      - postgres
+      - clickhouse
+    networks:
+      - game-network
+
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_DB: game_releases
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - game-network
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_DB: game_releases
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    ports:
+      - "8123:8123"  # HTTP interface
+      - "9000:9000"  # Native protocol
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse-config.xml:/etc/clickhouse-server/config.d/logging.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - game-network
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+
+networks:
+  game-network:
+    driver: bridge
