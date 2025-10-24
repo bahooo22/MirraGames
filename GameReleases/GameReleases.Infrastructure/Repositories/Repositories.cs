@@ -511,7 +511,7 @@ public class GameRepository(AppDbContext context) : Repository<Game>(context), I
                     GamesCount: genreGroup.Count(),
                     AvgFollowers: monthGroup.Where(g => g.Genres.Contains(genreGroup.Key))
                         .Average(g => g.Followers))))
-            .ToHashSet();
+            .ToList();
 
         return dynamics;
     }

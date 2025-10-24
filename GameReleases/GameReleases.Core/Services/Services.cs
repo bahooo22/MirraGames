@@ -1,4 +1,5 @@
-﻿using System.IdentityModel.Tokens.Jwt;
+﻿using System.Globalization;
+using System.IdentityModel.Tokens.Jwt;
 using System.Linq.Expressions;
 using System.Security.Claims;
 using System.Text;
@@ -18,6 +19,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.Playwright;
 
 namespace GameReleases.Core.Services;
 
@@ -211,6 +213,123 @@ public abstract class Services<TEntity, TId, TCreateRequest, TUpdateRequest, TRe
     }
 }
 
+public class SteamFollowersService : ISteamFollowersService, IAsyncDisposable, IDisposable
+{
+    private readonly ILogger<SteamFollowersService> _logger;
+    private readonly SemaphoreSlim _semaphore = new(2, 2);
+    private readonly Dictionary<string, (DateTime fetched, int followers)> _cache = new();
+
+    private IPlaywright? _playwright;
+    private IBrowser? _browser;
+    private IBrowserContext? _context;
+    private IPage? _page;
+
+    public SteamFollowersService(ILogger<SteamFollowersService> logger)
+    {
+        _logger = logger;
+    }
+
+    public async Task InitializeAsync()
+    {
+        _logger.LogInformation("Initializing Playwright...");
+        _playwright = await Playwright.CreateAsync();
+
+        _logger.LogInformation("Launching Chromium...");
+        _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        {
+            Headless = true,
+            Args = ["--no-sandbox", "--disable-gpu"]
+        });
+
+        _logger.LogInformation("Creating browser context...");
+        _context = await _browser.NewContextAsync(new BrowserNewContextOptions
+        {
+            Locale = "en-US",
+            ViewportSize = new ViewportSize { Width = 1280, Height = 800 }
+        });
+
+        _logger.LogInformation("Opening new page...");
+        _page = await _context.NewPageAsync();
+    }
+
+    public async Task<int> GetFollowersAsync(string appId, CancellationToken ct = default)
+    {
+        if (_page == null)
+            await InitializeAsync();
+
+        await _semaphore.WaitAsync(ct);
+        try
+        {
+            if (_cache.TryGetValue(appId, out var cached) && (DateTime.UtcNow - cached.fetched).TotalHours < 6)
+            {
+                _logger.LogInformation("Using cached value {Followers} for AppId={AppId}", cached.followers, appId);
+                return cached.followers;
+            }
+
+            var url = $"https://steamcommunity.com/search/groups/?text={appId}";
+            _logger.LogInformation("Navigating to {Url}", url);
+            await _page!.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+
+            try
+            {
+                _logger.LogInformation("Waiting for search_row selector...");
+                await _page.WaitForSelectorAsync("div.search_row", new PageWaitForSelectorOptions { Timeout = 7000 });
+
+                // точечно берём второй div и сам span с числом
+                var membersText = await _page.InnerTextAsync("div.search_row div.searchPersonaInfo div:nth-of-type(2) span");
+                _logger.LogInformation("Raw members text for AppId={AppId}: {Text}", appId, membersText);
+
+                var normalized = membersText.Trim().Replace("\u00A0", "").Replace(" ", "");
+                _logger.LogInformation("Normalized text for AppId={AppId}: '{Text}'", appId, normalized);
+
+                if (int.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out var followers))
+                {
+                    _cache[appId] = (DateTime.UtcNow, followers);
+                    _logger.LogInformation("✔ Parsed {Followers} followers for AppId={AppId}", followers, appId);
+                    return followers;
+                }
+                else
+                {
+                    var digits = Regex.Match(normalized, @"\d+").Value;
+                    if (int.TryParse(digits, out followers))
+                    {
+                        _cache[appId] = (DateTime.UtcNow, followers);
+                        _logger.LogInformation("✔ Parsed {Followers} followers for AppId={AppId}", followers, appId);
+                        return followers;
+                    }
+                    _logger.LogWarning("Failed to parse followers count from '{MembersText}' for AppId={AppId}", membersText, appId);
+                }
+
+            }
+            catch (TimeoutException)
+            {
+                _logger.LogWarning("⚠ Timeout waiting for selector on AppId={AppId}", appId);
+            }
+
+            _logger.LogWarning("Returning 0 followers for AppId={AppId}", appId);
+            return 0;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _logger.LogInformation("Disposing Playwright resources...");
+        if (_page != null) await _page.CloseAsync();
+        if (_context != null) await _context.CloseAsync();
+        if (_browser != null) await _browser.CloseAsync();
+        _playwright?.Dispose();
+    }
+
+    public void Dispose()
+    {
+        DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+}
+
 public class GameService(
     IAnalyticsRepository analyticsRepository,
     ISteamService steamService,
@@ -218,6 +337,7 @@ public class GameService(
     ILogger<GameService> logger)
     : Services<Game, Guid, CreateGameRequest, UpdateGameRequest, GameResponse>(gameRepository, logger), IGameService
 {
+
     // Реализация абстрактных методов маппинга
     protected override Game MapToEntity(CreateGameRequest request)
     {
@@ -520,586 +640,377 @@ public class AnalyticsService : IAnalyticsService
 
 public class SteamService : ISteamService
 {
+    private readonly ISteamFollowersService _followersService;
     private readonly IGameRepository _gameRepository;
     private readonly HttpClient _httpClient;
     private readonly ILogger<SteamService> _logger;
 
-    public SteamService(IGameRepository gameRepository, ILogger<SteamService> logger)
+    public SteamService(IGameRepository gameRepository,
+        ISteamFollowersService followersService,
+        ILogger<SteamService> logger)
     {
+        _followersService = followersService;
         _gameRepository = gameRepository;
         _logger = logger;
         _httpClient = new HttpClient();
-        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("GameReleasesBot/1.0");
+        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/118.0.0.0 Safari/537.36");
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
+        _httpClient.DefaultRequestHeaders.Add("Cookie", "Steam_Language=english");
+        _httpClient.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
+
+
     }
 
-    public async Task<IEnumerable<object>> GetTopGenresAsync(string month)
+    // -------------------------------------------------------------
+    // Получение количества подписчиков (followers) через Steam Community Search
+    // -------------------------------------------------------------
+    private static readonly SemaphoreSlim _semaphore = new(3, 3); // максимум 3 одновременных запроса
+    private readonly Dictionary<string, (DateTime fetched, int followers)> _cache = new(); // кеш на 6ч
+
+    private async Task<int> GetFollowersFromCommunityAsync(string appId)
     {
-        if (string.IsNullOrWhiteSpace(month))
-            throw new ArgumentException("month is required (yyyy-MM)", nameof(month));
-
-        if (!DateTime.TryParse($"{month}-01", out var monthDate))
-            throw new ArgumentException("month must be in format yyyy-MM", nameof(month));
-
-        // Диапазон месяца [start, end]
-        var startDate = new DateTime(monthDate.Year, monthDate.Month, 1, 0, 0, 0, DateTimeKind.Utc);
-        var endDate = startDate.AddMonths(1).AddTicks(-1);
-
-        // Берём все игры за месяц
-        var games = await _gameRepository.GetGamesByDateRangeAsync(startDate, endDate);
-
-        // Считаем статистику по жанрам
-        var stats = games
-            .SelectMany(g => g.Genres.Select(genre => new { Genre = genre, Game = g }))
-            .GroupBy(x => x.Genre)
-            .Select(g => new
+        await _semaphore.WaitAsync();
+        try
+        {
+            // Проверка кеша (если уже брали за последние 6ч)
+            if (_cache.TryGetValue(appId, out var cached) && (DateTime.UtcNow - cached.fetched).TotalHours < 6)
             {
-                genre = g.Key,
-                games = g.Count(),
-                avgFollowers = (int)Math.Round(g.Average(x => x.Game.Followers))
-            })
-            .OrderByDescending(x => x.games)
-            .Take(5);
+                _logger.LogDebug("Cache hit for AppId={AppId}: {Followers}", appId, cached.followers);
+                return cached.followers;
+            }
 
-        return stats.ToList();
+            var url = $"https://steamcommunity.com/search/groups/?text={appId}";
+            _logger.LogDebug("Requesting community page for AppId={AppId}: {Url}", appId, url);
+
+            var html = await _httpClient.GetStringAsync(url);
+
+            if (string.IsNullOrWhiteSpace(html))
+            {
+                _logger.LogWarning("Empty response for AppId={AppId}", appId);
+                return 0;
+            }
+
+            _logger.LogDebug("Received HTML for AppId={AppId}, length={Length}", appId, html.Length);
+
+            // выводим первые 1000 символов HTML для отладки
+            _logger.LogDebug("HTML snippet for AppId={AppId}: {Snippet}",
+                appId,
+                html.Substring(0, Math.Min(1000, html.Length)));
+
+            var doc = new HtmlAgilityPack.HtmlDocument();
+            doc.LoadHtml(html);
+
+            // ищем строку результата для нужного appId
+            var resultRow = doc.DocumentNode.SelectSingleNode(
+                $"//div[contains(@class,'search_row') and .//a[contains(@href,'{appId}')]]");
+
+            if (resultRow == null)
+            {
+                _logger.LogWarning("No search result found for AppId={AppId}", appId);
+                return 0;
+            }
+
+            // выводим кусок HTML найденного блока
+            _logger.LogDebug("ResultRow HTML for AppId={AppId}: {Snippet}",
+                appId,
+                resultRow.InnerHtml.Length > 500
+                    ? resultRow.InnerHtml.Substring(0, 500) + "..."
+                    : resultRow.InnerHtml);
+
+            // ищем span внутри блока searchPersonaInfo
+            var countSpan = resultRow.SelectSingleNode(".//div[contains(@class,'searchPersonaInfo')]//span");
+
+            if (countSpan != null)
+            {
+                var rawText = countSpan.InnerText.Trim();
+                _logger.LogDebug("Raw span text for AppId={AppId}: '{Raw}'", appId, rawText);
+
+                if (int.TryParse(rawText, out var followers))
+                {
+                    _cache[appId] = (DateTime.UtcNow, followers);
+                    _logger.LogInformation("✔ Found {Followers} followers for AppId={AppId}", followers, appId);
+                    return followers;
+                }
+
+                var digits = Regex.Match(rawText, @"\\d+").Value;
+                _logger.LogDebug("Regex digits from span for AppId={AppId}: '{Digits}'", appId, digits);
+
+                if (int.TryParse(digits, out followers))
+                {
+                    _cache[appId] = (DateTime.UtcNow, followers);
+                    _logger.LogInformation("✔ Found {Followers} followers for AppId={AppId}", followers, appId);
+                    return followers;
+                }
+            }
+            else
+            {
+                _logger.LogDebug("No <span> found inside searchPersonaInfo for AppId={AppId}", appId);
+            }
+
+            // fallback: ищем любое число в тексте всей строки
+            var rowText = (resultRow.InnerText ?? "").Trim();
+            _logger.LogDebug("Fallback row text for AppId={AppId}: '{RowText}'", appId, rowText);
+
+            var digitsFallback = Regex.Match(rowText, @"\\b\\d+\\b");
+            if (digitsFallback.Success && int.TryParse(digitsFallback.Value, out var followersFallback))
+            {
+                _cache[appId] = (DateTime.UtcNow, followersFallback);
+                _logger.LogInformation("✔ Found (fallback) {Followers} followers for AppId={AppId}", followersFallback, appId);
+                return followersFallback;
+            }
+
+            _logger.LogWarning("Followers not found in HTML for AppId={AppId}", appId);
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error while parsing followers for AppId={AppId}", appId);
+            return 0;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
     }
 
-    //-------------------------------------------------------------
-    // Парсинг количества подписчиков(followers) со страницы магазина
-    //-------------------------------------------------------------
-
-
+    // -------------------------------------------------------------
+    // Поиск upcoming игр через Steam Store Search
+    // -------------------------------------------------------------
     private const string SteamSearchUrl =
         "https://store.steampowered.com/search/?sort_by=Released_DESC&category1=998&ndl=1&page={0}";
 
-    /// <summary>
-    /// Парсит страницы поиска Steam, собирает appId и дату релиза всех upcoming‑игр.
-    /// Останавливается, когда встречает игру с датой после endDate: после ноября 2025.
-    /// </summary>
     private async Task<List<SteamSearchResult>> GetUpcomingAppIdsAsync(DateTime startDate, DateTime endDate)
     {
-        _logger.LogInformation("🔍 Searching Steam for games from {StartDate:yyyy-MM} to {EndDate:yyyy-MM}",
-            startDate, endDate);
-
         var results = new List<SteamSearchResult>();
         int page = 0;
         bool hasMore = true;
-        int totalRowsProcessed = 0;
 
-        while (hasMore && page < 10) // TODO:Ограничим 10 страницами для теста
+        while (hasMore && page < 3)
         {
             page++;
             var url = string.Format(SteamSearchUrl, page);
-            _logger.LogInformation("📄 Fetching page {Page}: {Url}", page, url);
-
             try
             {
                 var html = await _httpClient.GetStringAsync(url);
-                _logger.LogDebug("✅ Successfully fetched page {Page}, HTML length: {Length} chars", page, html.Length);
-
-                await Task.Delay(2000); // Увеличим паузу
+                await Task.Delay(2000);
 
                 var doc = new HtmlDocument();
                 doc.LoadHtml(html);
 
-                // Ищем строки с играми
                 var rows = doc.DocumentNode.SelectNodes("//a[contains(@class, 'search_result_row')]");
-
-                if (rows == null || !rows.Any())
-                {
-                    _logger.LogWarning("❌ No game rows found on page {Page}. HTML might have different structure.",
-                        page);
-
-                    // Дамп небольшой части HTML для отладки
-                    if (html.Length > 500)
-                    {
-                        _logger.LogDebug("First 500 chars of HTML: {HtmlSample}", html.Substring(0, 500));
-                    }
-
-                    break;
-                }
-
-                _logger.LogInformation("🎮 Found {RowCount} game rows on page {Page}", rows.Count, page);
-                totalRowsProcessed += rows.Count;
-
-                bool foundGameInRange = false;
+                if (rows == null || !rows.Any()) break;
 
                 foreach (var row in rows)
                 {
-                    try
+                    var dataDsAppid = row.GetAttributeValue("data-ds-appid", "");
+                    if (string.IsNullOrEmpty(dataDsAppid)) continue;
+
+                    var releaseNode = row.SelectSingleNode(".//div[contains(@class, 'search_released')]");
+                    var releaseText = releaseNode?.InnerText.Trim() ?? "";
+                    var releaseDate = ParseReleaseDate(releaseText);
+                    if (!releaseDate.HasValue) continue;
+
+                    if (releaseDate.Value >= startDate && releaseDate.Value <= endDate)
                     {
-                        // Получаем appId
-                        var dataDsAppid = row.GetAttributeValue("data-ds-appid", "");
-                        var dataDsBundleid = row.GetAttributeValue("data-ds-bundleid", "");
-                        var dataDsPackageid = row.GetAttributeValue("data-ds-packageid", "");
-
-                        _logger.LogDebug("📦 AppID: {AppId}, Bundle: {Bundle}, Package: {Package}",
-                            dataDsAppid, dataDsBundleid, dataDsPackageid);
-
-                        if (string.IsNullOrEmpty(dataDsAppid))
+                        var appId = dataDsAppid.Split(',')[0];
+                        results.Add(new SteamSearchResult
                         {
-                            _logger.LogDebug("⏩ Skipping row with empty appId");
-                            continue;
-                        }
-
-                        // Получаем дату релиза
-                        var releaseNode = row.SelectSingleNode(".//div[contains(@class, 'search_released')]");
-                        var releaseText = releaseNode?.InnerText.Trim() ?? "No release date";
-
-                        _logger.LogDebug("📅 Release text: '{ReleaseText}'", releaseText);
-
-                        var releaseDate = ParseReleaseDate(releaseText);
-
-                        if (!releaseDate.HasValue)
-                        {
-                            _logger.LogDebug("⏩ Skipping - cannot parse release date");
-                            continue;
-                        }
-
-                        _logger.LogDebug("✅ Parsed release date: {ParsedDate}", releaseDate);
-
-                        // Проверяем диапазон дат
-                        if (releaseDate.Value > endDate)
-                        {
-                            _logger.LogDebug("⏩ Date {ReleaseDate} beyond end date {EndDate}", releaseDate, endDate);
-                            continue;
-                        }
-
-                        if (releaseDate.Value >= startDate && releaseDate.Value <= endDate)
-                        {
-                            var appId = dataDsAppid.Split(',')[0]; // Берем первый appId
-                            results.Add(new SteamSearchResult
-                            {
-                                AppId = appId,
-                                ReleaseDate = releaseDate.Value
-                            });
-                            foundGameInRange = true;
-                            _logger.LogInformation("🎯 ADDED: AppID {AppId} with date {ReleaseDate:yyyy-MM}",
-                                appId, releaseDate.Value);
-                        }
-                        else
-                        {
-                            _logger.LogDebug("⏩ Date {ReleaseDate} outside range", releaseDate);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "❌ Error processing game row");
+                            AppId = appId,
+                            ReleaseDate = releaseDate.Value
+                        });
                     }
                 }
-
-                _logger.LogInformation("📊 Page {Page} completed. Results so far: {ResultsCount}", page, results.Count);
-
-                // Если на странице не нашли игр в диапазоне, останавливаемся
-                if (!foundGameInRange && rows.Any())
-                {
-                    _logger.LogInformation("🛑 No games in date range found on page {Page}, stopping search", page);
-                    break;
-                }
-
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "❌ Error fetching page {Page}", page);
+                _logger.LogError(ex, "Ошибка при парсинге страницы {Page}", page);
                 break;
             }
         }
-
-        _logger.LogInformation("🎉 Search completed: {TotalRows} rows processed, {TotalResults} games found",
-            totalRowsProcessed, results.Count);
 
         return results;
     }
 
     private static readonly Regex _monthYearRegex = new(@"(\w+)\s+(\d{4})", RegexOptions.Compiled);
     private static readonly Regex _yearOnlyRegex = new(@"\b(20\d{2})\b", RegexOptions.Compiled);
-
     private static readonly string[] _months =
-    [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-    ];
+    {
+        "Jan","Feb","Mar","Apr","May","Jun",
+        "Jul","Aug","Sep","Oct","Nov","Dec"
+    };
 
     private static DateTime? ParseReleaseDate(string text)
     {
         if (string.IsNullOrWhiteSpace(text) ||
             text.Contains("TBA", StringComparison.OrdinalIgnoreCase) ||
-            text.Contains("Coming Soon", StringComparison.OrdinalIgnoreCase) ||
-            text.Contains("To be announced", StringComparison.OrdinalIgnoreCase))
-        {
+            text.Contains("Coming Soon", StringComparison.OrdinalIgnoreCase))
             return null;
-        }
 
-        text = text.Trim();
-
-        // "Nov 2025" - точная дата месяца
         var match = _monthYearRegex.Match(text);
         if (match.Success)
         {
             var monthName = match.Groups[1].Value;
             var year = int.Parse(match.Groups[2].Value);
             var month = Array.IndexOf(_months, monthName) + 1;
-            if (month > 0)
-                return new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc);
+            if (month > 0) return new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc);
         }
 
-        // "2025" - только год
         var yearMatch = _yearOnlyRegex.Match(text);
         if (yearMatch.Success)
         {
             var year = int.Parse(yearMatch.Value);
-            if (year >= 2024 && year <= 2030)
-                return new DateTime(year, 6, 15, 0, 0, 0, DateTimeKind.Utc); // Середина года
+            return new DateTime(year, 6, 15, 0, 0, 0, DateTimeKind.Utc);
         }
 
-        // Кварталы "Q4 2025"
-        if (text.Contains("Q4", StringComparison.OrdinalIgnoreCase) ||
-            text.Contains("4 Quarter", StringComparison.OrdinalIgnoreCase))
-        {
-            var year = ExtractYear(text);
-            return year.HasValue ? new DateTime(year.Value, 10, 1, 0, 0, 0, DateTimeKind.Utc) : null;
-        }
-
-        if (text.Contains("Q3", StringComparison.OrdinalIgnoreCase) ||
-            text.Contains("3 Quarter", StringComparison.OrdinalIgnoreCase))
-        {
-            var year = ExtractYear(text);
-            return year.HasValue ? new DateTime(year.Value, 7, 1, 0, 0, 0, DateTimeKind.Utc) : null;
-        }
-
-        if (text.Contains("Q2", StringComparison.OrdinalIgnoreCase) ||
-            text.Contains("2 Quarter", StringComparison.OrdinalIgnoreCase))
-        {
-            var year = ExtractYear(text);
-            return year.HasValue ? new DateTime(year.Value, 4, 1, 0, 0, 0, DateTimeKind.Utc) : null;
-        }
-
-        if (text.Contains("Q1", StringComparison.OrdinalIgnoreCase) ||
-            text.Contains("1 Quarter", StringComparison.OrdinalIgnoreCase))
-        {
-            var year = ExtractYear(text);
-            return year.HasValue ? new DateTime(year.Value, 1, 1, 0, 0, 0, DateTimeKind.Utc) : null;
-        }
-
-        // Пытаемся распарсить как обычную дату
-        if (DateTime.TryParse(text, out var parsedDate))
-        {
-            return DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
-        }
+        if (DateTime.TryParse(text, out var parsed))
+            return DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
 
         return null;
     }
 
-    private static int? ExtractYear(string text)
-    {
-        var match = _yearOnlyRegex.Match(text);
-        return match.Success ? int.Parse(match.Value) : null;
-    }
-
+    // -------------------------------------------------------------
+    // Синхронизация игр
+    // -------------------------------------------------------------
     public async Task SyncUpcomingGamesAsync(DateTime startDate, DateTime endDate)
     {
-        _logger.LogInformation("🔄 Starting Steam sync for {StartDate:yyyy-MM} to {EndDate:yyyy-MM}",
-            startDate, endDate);
-
-        try
+        var upcomingList = await GetUpcomingAppIdsAsync(startDate, endDate);
+        if (!upcomingList.Any())
         {
-            // 1. Поиск upcoming игр через Steam Search
-            _logger.LogInformation("🔍 Searching for upcoming games...");
-            var upcomingList = await GetUpcomingAppIdsAsync(startDate, endDate);
-
-            if (!upcomingList.Any())
-            {
-                _logger.LogWarning("❌ No upcoming games found in date range");
-                return;
-            }
-
-            _logger.LogInformation("📊 Found {Count} upcoming games", upcomingList.Count);
-
-            // 2. ⭐ ИЗМЕНЕНИЕ: Обрабатываем игры по 10 за раз (вместо 100)
-            var appIdChunks = upcomingList.Chunk(10); // Уменьшили с 100 до 10
-            int totalProcessed = 0;
-            int totalAdded = 0;
-            int totalUpdated = 0;
-            int errorCount = 0;
-
-            foreach (var chunk in appIdChunks)
-            {
-                _logger.LogDebug("Processing chunk of {ChunkSize} games", chunk.Length);
-
-                // Обрабатываем каждую игру отдельно
-                foreach (var gameInfo in chunk)
-                {
-                    try
-                    {
-                        _logger.LogDebug("🔄 Processing game {AppId}", gameInfo.AppId);
-
-                        // Запрашиваем детали для ОДНОЙ игры
-                        var game = await GetGameDetailsAsync(gameInfo.AppId, gameInfo.ReleaseDate);
-                        if (game == null)
-                        {
-                            errorCount++;
-                            continue;
-                        }
-
-                        // Сохранение в базу
-                        var existing = await _gameRepository.GetByAppIdAsync(game.AppId);
-                        if (existing != null)
-                        {
-                            await UpdateExistingGame(existing, game);
-                            totalUpdated++;
-                            _logger.LogDebug("✅ Updated game: {GameName}", game.Name);
-                        }
-                        else
-                        {
-                            await _gameRepository.AddAsync(game);
-                            totalAdded++;
-                            _logger.LogInformation("🎯 Added new game: {GameName}", game.Name);
-                        }
-
-                        totalProcessed++;
-
-                        // ПАУЗА между запросами
-                        await Task.Delay(1500);
-                    }
-                    catch (Exception ex)
-                    {
-                        errorCount++;
-                        _logger.LogError(ex, "❌ Error processing game {AppId}", gameInfo.AppId);
-                    }
-                }
-            }
-
-            await _gameRepository.SaveChangesAsync();
-
-            _logger.LogInformation(
-                "🎉 Sync completed: Processed={Processed}, Added={Added}, Updated={Updated}, Errors={Errors}",
-                totalProcessed, totalAdded, totalUpdated, errorCount);
+            _logger.LogInformation("No upcoming games found between {Start} and {End}", startDate, endDate);
+            return;
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "❌ Steam sync failed");
-            throw;
-        }
-    }
 
-    /// <summary>
-    /// МЕТОД ДЛЯ ПОЛУЧЕНИЯ ДЕТАЛЕЙ ОДНОЙ ИГРЫ
-    /// </summary>
-    /// <param name="appId"></param>
-    /// <param name="releaseDate"></param>
-    /// <returns></returns>
-    private async Task<Game?> GetGameDetailsAsync(string appId, DateTime? releaseDate)
-    {
-        const int maxRetries = 3;
-
-        for (int attempt = 1; attempt <= maxRetries; attempt++)
+        foreach (var gameInfo in upcomingList)
         {
             try
             {
-                var detailsUrl = $"https://store.steampowered.com/api/appdetails?appids={appId}";
-                _logger.LogDebug("🌐 Fetching details for {AppId}", appId);
+                _logger.LogInformation("Processing game {AppId} with release date {ReleaseDate}", gameInfo.AppId, gameInfo.ReleaseDate);
 
-                var json = await _httpClient.GetStringAsync(detailsUrl);
-
-                var detailsDict = JsonSerializer.Deserialize<Dictionary<string, AppDetails>>(json);
-                if (detailsDict == null || !detailsDict.TryGetValue(appId, out var appDetails))
+                var game = await GetGameDetailsAsync(gameInfo.AppId, gameInfo.ReleaseDate);
+                if (game == null)
                 {
-                    _logger.LogWarning("❌ Failed to deserialize response for {AppId}", appId);
-                    return null;
+                    _logger.LogWarning("No details found for AppId={AppId}", gameInfo.AppId);
+                    continue;
                 }
 
-                if (!appDetails.success)
+                var existing = await _gameRepository.GetByAppIdAsync(game.AppId);
+
+                if (existing == null
+                    || existing.CollectedAt < DateTime.UtcNow.AddDays(-1)
+                    || existing.Followers == 0)
                 {
-                    _logger.LogDebug("⏩ App {AppId} not successful in API", appId);
-                    return null;
+                    var followers = await _followersService.GetFollowersAsync(game.AppId);
+                    game.Followers = followers;
+                    game.CollectedAt = DateTime.UtcNow;
+
+                    _logger.LogInformation("✔ AppId={AppId}, Name={Name}, Followers={Followers}", game.AppId, game.Name, followers);
+                }
+                else
+                {
+                    game.Followers = existing.Followers;
+                    game.CollectedAt = existing.CollectedAt;
+
+                    _logger.LogInformation("↺ AppId={AppId}, Name={Name}, using cached Followers={Followers}", game.AppId, game.Name, existing.Followers);
                 }
 
-                var data = appDetails.data;
+                if (existing != null)
+                    await UpdateExistingGame(existing, game);
+                else
+                    await _gameRepository.AddAsync(game);
 
-                // Определяем дату релиза
-                DateTime? preciseDate = null;
-                if (DateTime.TryParse(data.release_date?.date, out var pd))
-                {
-                    preciseDate = DateTime.SpecifyKind(pd, DateTimeKind.Utc);
-                    _logger.LogDebug("📅 Parsed precise date for {AppId}: {Date}", appId, preciseDate);
-                }
-
-                // ИСПОЛЬЗУЕМ releaseDate.Value ИЛИ preciseDate
-                var finalReleaseDate = preciseDate ?? releaseDate;
-
-                if (!finalReleaseDate.HasValue)
-                {
-                    _logger.LogWarning("❌ No release date found for {AppId}", appId);
-                    return null;
-                }
-
-                var game = new Game
-                {
-                    AppId = appId,
-                    Name = data.name?.Trim() ?? "Unknown",
-                    ReleaseDate = preciseDate ?? releaseDate,
-                    Genres = data.genres?.Select(g => g.description.Trim()).ToHashSet() ?? [],
-                    ShortDescription = data.short_description?.Trim() ?? "",
-                    PosterUrl = data.header_image?.Trim() ?? "",
-                    Platforms = GetPlatforms(data.platforms),
-                    StoreUrl = $"https://store.steampowered.com/app/{appId}/",
-                    Followers = await GetFollowersAsync(appId),
-                    CollectedAt = DateTime.UtcNow
-                };
-
-                _logger.LogDebug("✅ Created game: {Name} ({AppId})", game.Name, game.AppId);
-
-                await Task.Delay(500); // 2 секунды между запросами
-                return game;
-            }
-            catch (HttpRequestException) when (attempt < maxRetries)
-            {
-                _logger.LogWarning("⚠️ Attempt {Attempt} failed for {AppId}, retrying...", attempt, appId);
-                await Task.Delay(2000 * attempt); // Увеличивающаяся пауза
+                await Task.Delay(1000); // пауза между запросами
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "❌ Error getting details for {AppId}", appId);
-                return null;
+                _logger.LogError(ex, "Error while processing the game {AppId}", gameInfo.AppId);
             }
         }
 
-        return null;
+        await _gameRepository.SaveChangesAsync();
+        _logger.LogInformation("Saved all game updates to the database");
     }
 
-    private async Task<Game?> CreateGameFromDetails(string appId, AppData data, SteamSearchResult[] chunk)
+    // -------------------------------------------------------------
+    // Детали игры
+    // -------------------------------------------------------------
+    private async Task<Game?> GetGameDetailsAsync(string appId, DateTime? releaseDate)
     {
+        var detailsUrl = $"https://store.steampowered.com/api/appdetails?appids={appId}";
         try
         {
-            var searchResult = chunk.FirstOrDefault(x => x.AppId == appId);
-            if (searchResult == null) return null;
+            var json = await _httpClient.GetStringAsync(detailsUrl);
+            var detailsDict = JsonSerializer.Deserialize<Dictionary<string, AppDetails>>(json);
+            if (detailsDict == null || !detailsDict.TryGetValue(appId, out var appDetails) || !appDetails.success)
+                return null;
 
-            // Определяем дату релиза
+            var data = appDetails.data;
             DateTime? preciseDate = null;
             if (DateTime.TryParse(data.release_date?.date, out var pd))
-            {
                 preciseDate = DateTime.SpecifyKind(pd, DateTimeKind.Utc);
-            }
 
-            var game = new Game
+            var finalReleaseDate = preciseDate ?? releaseDate;
+            if (!finalReleaseDate.HasValue) return null;
+
+            return new Game
             {
                 AppId = appId,
                 Name = data.name?.Trim() ?? "Unknown",
-                ReleaseDate = preciseDate ?? searchResult.ReleaseDate,
-                Genres = data.genres?.Select(g => g.description.Trim()).ToHashSet() ?? [],
+                ReleaseDate = finalReleaseDate,
+                Genres = data.genres?.Select(g => g.description.Trim()).ToList() ?? new List<string>(),
                 ShortDescription = data.short_description?.Trim() ?? "",
                 PosterUrl = data.header_image?.Trim() ?? "",
                 Platforms = GetPlatforms(data.platforms),
                 StoreUrl = $"https://store.steampowered.com/app/{appId}/",
-                Followers = await GetFollowersAsync(appId),
+                Followers = 0, // обновим позже в SyncUpcomingGamesAsync
                 CollectedAt = DateTime.UtcNow
             };
-
-            return game;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error creating game from details for {AppId}", appId);
+            _logger.LogError(ex, "Ошибка при получении деталей для {AppId}", appId);
             return null;
         }
     }
 
-    private static HashSet<string> GetPlatforms(Platforms platforms)
+    private static List<string> GetPlatforms(Platforms platforms)
     {
-        var result = new HashSet<string>();
+        var result = new List<string>();
         if (platforms?.windows == true) result.Add("Windows");
         if (platforms?.mac == true) result.Add("Mac");
         if (platforms?.linux == true) result.Add("Linux");
+
         return result;
     }
 
+    // -------------------------------------------------------------
+    // Обновление существующей игры
+    // -------------------------------------------------------------
     private async Task UpdateExistingGame(Game existing, Game newData)
     {
         existing.Name = newData.Name;
         existing.ReleaseDate = newData.ReleaseDate;
         existing.Genres = newData.Genres;
-        existing.Followers = newData.Followers;
         existing.ShortDescription = newData.ShortDescription;
         existing.PosterUrl = newData.PosterUrl;
         existing.Platforms = newData.Platforms;
         existing.StoreUrl = newData.StoreUrl;
-        existing.CollectedAt = newData.CollectedAt;
+
+        // Followers обновляем только если новые данные свежее и > 0
+        if (newData.CollectedAt > existing.CollectedAt && newData.Followers > 0)
+        {
+            existing.Followers = newData.Followers;
+            existing.CollectedAt = newData.CollectedAt;
+        }
 
         await _gameRepository.UpdateAsync(existing);
     }
 
-    private async Task<int> GetFollowersAsync(string appId)
-    {
-        const int maxRetries = 3;
-        const int delayMs = 1500; // небольшая пауза между запросами – уважение к Steam
-
-        var url = $"https://store.steampowered.com/app/{appId}/";
-
-        for (int attempt = 1; attempt <= maxRetries; attempt++)
-        {
-            try
-            {
-                // 1. Получаем HTML страницы
-                var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
-                response.EnsureSuccessStatusCode();
-
-                var html = await response.Content.ReadAsStringAsync();
-
-                // 2. Ищем нужный кусок
-                //    В 2025‑м Steam всё ещё кладёт followers в JSON‑блок внутри <script type="text/javascript">
-                //    Пример строки:
-                //    "followers":123456,
-                var match = Regex.Match(html,
-                    @"""followers""\s*:\s*(\d+)",
-                    RegexOptions.IgnoreCase | RegexOptions.Singleline);
-
-                if (match.Success && int.TryParse(match.Groups[1].Value, out var followers))
-                {
-                    // небольшая задержка – не спамим
-                    await Task.Delay(delayMs);
-                    return followers;
-                }
-
-                // Если регулярка не сработала – пробуем HtmlAgilityPack (запасной вариант)
-                return await ParseFollowersWithHap(html);
-            }
-            catch (HttpRequestException ex) when (attempt < maxRetries)
-            {
-                // Логируем 
-                _logger.LogError($"[Attempt {attempt}] HTTP error for app {appId}: {ex.Message}");
-                await Task.Delay(delayMs * attempt);
-            }
-            catch (TaskCanceledException) when (attempt < maxRetries)
-            {
-                await Task.Delay(delayMs * attempt);
-            }
-        }
-
-        // Если всё упало – возвращаем 0 (заглушка)
-        return -1;
-    }
-
-    // --------------------------------------------------------------------
-    //  Запасной парсер через HtmlAgilityPack (на случай изменения структуры)
-    // --------------------------------------------------------------------
-    private static Task<int> ParseFollowersWithHap(string html)
-    {
-        var doc = new HtmlDocument();
-        doc.LoadHtml(html);
-
-        // На странице есть блок <div class="glance_ctn"> → внутри <div class="follower_stats">
-        var followerNode = doc.DocumentNode
-            .SelectSingleNode("//div[contains(@class,'follower_stats')]//span[@class='count']");
-
-        if (followerNode != null &&
-            int.TryParse(Regex.Replace(followerNode.InnerText, @"[^\d]", ""), out var followers))
-        {
-            return Task.FromResult(followers);
-        }
-
-        return Task.FromResult(0);
-    }
-
+    // -------------------------------------------------------------
+    // Публичные методы для API
+    // -------------------------------------------------------------
     public async Task<IEnumerable<Game>> GetReleasesAsync(string month)
     {
         var date = DateTime.Parse(month + "-01");
@@ -1125,65 +1036,59 @@ public class SteamService : ISteamService
 
         var monthList = monthsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries)
             .Select(m => m.Trim())
-            .OrderBy(m => m) // сортируем, чтобы было по порядку
+            .OrderBy(m => m)
             .ToList();
 
-        // Преобразуем в диапазон дат
         var ranges = monthList.Select(m =>
         {
             if (!DateTime.TryParse($"{m}-01", out var parsed))
                 throw new ArgumentException($"Invalid month format: {m}");
-
             var start = new DateTime(parsed.Year, parsed.Month, 1, 0, 0, 0, DateTimeKind.Utc);
             var end = start.AddMonths(1).AddTicks(-1);
-            return (start, end, label: m);
+            return (Month: m, Start: start, End: end);
         }).ToList();
 
-        // Собираем игры за весь диапазон
-        var globalStart = ranges.Min(r => r.start);
-        var globalEnd = ranges.Max(r => r.end);
-
-        var allGames = await _gameRepository.GetGamesByDateRangeAsync(globalStart, globalEnd);
-
-        // Находим топ-5 жанров по количеству игр
-        var topGenres = allGames
-            .SelectMany(g => g.Genres.Select(genre => new { Genre = genre, Game = g }))
-            .GroupBy(x => x.Genre)
-            .OrderByDescending(g => g.Count())
-            .Take(5)
-            .Select(g => g.Key)
-            .ToList();
-
-        // Формируем динамику
-        var series = new List<object>();
-        foreach (var genre in topGenres)
+        var result = new List<object>();
+        foreach (var range in ranges)
         {
-            var counts = new List<int>();
-            var avgFollowers = new List<int>();
-
-            foreach (var (start, end, label) in ranges)
+            var games = await _gameRepository.GetGamesByDateRangeAsync(range.Start, range.End);
+            result.Add(new
             {
-                var gamesInMonth = allGames
-                    .Where(g => g.ReleaseDate >= start && g.ReleaseDate <= end && g.Genres.Contains(genre))
-                    .ToList();
-
-                counts.Add(gamesInMonth.Count);
-
-                if (gamesInMonth.Count > 0)
-                {
-                    var avg = gamesInMonth.Average(g => g.Followers);
-                    avgFollowers.Add((int)Math.Round(avg));
-                }
-                else
-                {
-                    avgFollowers.Add(0);
-                }
-            }
-
-            series.Add(new { genre, counts, avgFollowers });
+                month = range.Month,
+                count = games.Count(),
+                avgFollowers = games.Any() ? (int)Math.Round(games.Average(g => g.Followers)) : 0
+            });
         }
 
-        return new { months = monthList, series };
+        return result;
+    }
+
+    public async Task<IEnumerable<object>> GetTopGenresAsync(string month)
+    {
+        if (string.IsNullOrWhiteSpace(month))
+            throw new ArgumentException("month is required (yyyy-MM)", nameof(month));
+
+        if (!DateTime.TryParse($"{month}-01", out var monthDate))
+            throw new ArgumentException("month must be in format yyyy-MM", nameof(month));
+
+        var startDate = new DateTime(monthDate.Year, monthDate.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var endDate = startDate.AddMonths(1).AddTicks(-1);
+
+        var games = await _gameRepository.GetGamesByDateRangeAsync(startDate, endDate);
+
+        var stats = games
+            .SelectMany(g => g.Genres.Select(genre => new { Genre = genre, Game = g }))
+            .GroupBy(x => x.Genre)
+            .Select(g => new
+            {
+                genre = g.Key,
+                games = g.Count(),
+                avgFollowers = (int)Math.Round(g.Average(x => x.Game.Followers))
+            })
+            .OrderByDescending(x => x.games)
+            .Take(5);
+
+        return stats.ToList();
     }
 }
 
@@ -1302,7 +1207,7 @@ public class AppList
 
 public class App
 {
-    public int appid { get; set; }
+    public int Appid { get; set; }
     public string name { get; set; }
 }
 

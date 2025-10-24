@@ -114,6 +114,8 @@ public static class CoreExtensions
     {
         services.TryAddTransient<ISteamService, SteamService>();
         services.AddHostedService<SteamBackgroundService>();
+        services.TryAddSingleton<ISteamFollowersService, SteamFollowersService>();
+
         return services;
     }
 }

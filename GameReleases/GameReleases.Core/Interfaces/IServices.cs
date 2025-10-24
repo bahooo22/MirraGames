@@ -37,6 +37,11 @@ public interface IServices<TEntity, TId, TCreateRequest, TUpdateRequest, TRespon
     Task<int> CountAsync(Expression<Func<TEntity, bool>>? predicate = null);
 }
 
+public interface ISteamFollowersService
+{
+    Task<int> GetFollowersAsync(string appId, CancellationToken ct = default);
+}
+
 public interface IGameService : IServices<Game, Guid, CreateGameRequest, UpdateGameRequest, GameResponse>
 {
     // Специфичные методы для Game
