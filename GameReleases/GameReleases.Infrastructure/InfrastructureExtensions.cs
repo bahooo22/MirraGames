@@ -14,6 +14,8 @@ public static class InfrastructureExtensions
     {
         services.AddScoped(typeof(IRepository<>), typeof(Repository<>));
         services.AddSpecificRepository<IGameRepository, GameRepository>();
+        services.AddSpecificRepository<IAnalyticsRepository, AnalyticsRepository>();
+
         return services;
     }
 

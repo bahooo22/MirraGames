@@ -15,6 +15,15 @@ services:
     networks:
       - game-network
 
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.migrate
+    networks:
+      - game-network
+    depends_on:
+      - postgres
+
   postgres:
     image: postgres:13
     environment:
@@ -35,8 +44,8 @@ services:
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: ""
     ports:
-      - "8123:8123"  # HTTP interface
-      - "9000:9000"  # Native protocol
+      - "8123:8123"
+      - "9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./clickhouse-config.xml:/etc/clickhouse-server/config.d/logging.xml:ro

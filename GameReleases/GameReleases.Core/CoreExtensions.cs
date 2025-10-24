@@ -51,6 +51,10 @@ public static class CoreExtensions
         // Регистрируем сервисы для работы cо Steam
         services.AddSteamServices();
 
+        // Аналитический сервис
+        services.AddScoped<IAnalyticsService, AnalyticsService>();
+
+
         return services;
     }
 

@@ -51,15 +51,25 @@ public interface IGameService : IServices<Game, Guid, CreateGameRequest, UpdateG
         string? genre = null,
         string? platform = null);
     Task<bool> ExistsByAppIdAsync(string appId);
+
+    Task<IEnumerable<GameResponse>> GetReleasesAsync(string month, string? platform = null, string? genre = null);
+    Task<CalendarResponse> GetCalendarAsync(string month);
 }
+
+public interface IAnalyticsService
+{
+    Task<IEnumerable<GenreStatsResponse>> GetTopGenresAsync(string month);
+    Task<GenreDynamicsResultResponse> GetDynamicsAsync(string monthsCsv);
+}
+
 
 public interface ISteamService
 {
     Task SyncUpcomingGamesAsync(DateTime startDate, DateTime endDate); // Синхронизация данных
     Task<IEnumerable<Game>> GetReleasesAsync(string month); // e.g., "2025-11"
     Task<IEnumerable<object>> GetCalendarAsync(string month); // Агрегированный календарь
-    Task<IEnumerable<object>> GetTopGenresAsync(); // Топ-5 жанров
-    Task<object> GetDynamicsAsync(); // Динамика за 3 месяца
+    Task<IEnumerable<object>> GetTopGenresAsync(string month); // Топ-5 жанров
+    Task<object> GetDynamicsAsync(string month); // Динамика за 3 месяца
 }
 
 public interface IJwtService

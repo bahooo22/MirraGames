@@ -146,7 +146,7 @@ public abstract class Services<TEntity, TId, TCreateRequest, TUpdateRequest, TRe
             }
 
             UpdateEntity(entity, request);
-            _repository.Update(entity);
+            _repository.UpdateAsync(entity);
             await _repository.SaveChangesAsync();
 
             return MapToResponse(entity);
@@ -212,6 +212,8 @@ public abstract class Services<TEntity, TId, TCreateRequest, TUpdateRequest, TRe
 }
 
 public class GameService(
+    IAnalyticsRepository analyticsRepository,
+    ISteamService steamService,
     IGameRepository gameRepository,
     ILogger<GameService> logger)
     : Services<Game, Guid, CreateGameRequest, UpdateGameRequest, GameResponse>(gameRepository, logger), IGameService
@@ -266,17 +268,84 @@ public class GameService(
         entity.CollectedAt = DateTime.UtcNow;
     }
 
+    public override async Task<GameResponse> UpdateAsync(Guid id, UpdateGameRequest request)
+    {
+        var entity = await gameRepository.GetByIdAsync(id);
+        if (entity == null)
+            throw new KeyNotFoundException($"Game with Id '{id}' not found");
+
+        // Обновляем поля
+        UpdateEntity(entity, request);
+
+        await gameRepository.UpdateAsync(entity);
+
+        // Сохраняем снапшот в ClickHouse
+        await analyticsRepository.StoreGameAnalyticsAsync(entity);
+
+        return MapToResponse(entity);
+    }
+
+    public async Task<IEnumerable<GameResponse>> GetReleasesAsync(string month, string? platform = null, string? genre = null)
+    {
+        if (!DateTime.TryParse($"{month}-01", out var monthDate))
+            throw new ArgumentException("month must be in format yyyy-MM", nameof(month));
+
+        var startDate = new DateTime(monthDate.Year, monthDate.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var endDate = startDate.AddMonths(1).AddTicks(-1);
+
+        var games = await gameRepository.GetGamesByDateRangeAsync(startDate, endDate);
+
+        if (!string.IsNullOrEmpty(platform))
+            games = games.Where(g => g.Platforms.Contains(platform, StringComparer.OrdinalIgnoreCase));
+        if (!string.IsNullOrEmpty(genre))
+            games = games.Where(g => g.Genres.Contains(genre, StringComparer.OrdinalIgnoreCase));
+
+        return games.Select(GameResponse.FromEntity);
+    }
+
+    public async Task<CalendarResponse> GetCalendarAsync(string month)
+    {
+        if (!DateTime.TryParse($"{month}-01", out var monthDate))
+            throw new ArgumentException("month must be in format yyyy-MM", nameof(month));
+
+        var startDate = new DateTime(monthDate.Year, monthDate.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var endDate = startDate.AddMonths(1).AddTicks(-1);
+
+        var games = await gameRepository.GetGamesByDateRangeAsync(startDate, endDate);
+
+        var days = games
+            .GroupBy(g => g.ReleaseDate?.Date)
+            .Where(g => g.Key.HasValue)
+            .Select(g => new CalendarDayResponse
+            {
+                Date = g.Key!.Value,
+                Count = g.Count()
+            })
+            .OrderBy(d => d.Date)
+            .ToList();
+
+        return new CalendarResponse
+        {
+            Month = month,
+            Days = days
+        };
+    }
+
+
     // Переопределение CreateAsync для дополнительной валидации
     public override async Task<GameResponse> CreateAsync(CreateGameRequest request)
     {
-        // Проверка на существование игры с таким AppId
         var existingGame = await gameRepository.GetByAppIdAsync(request.AppId);
         if (existingGame != null)
-        {
             throw new InvalidOperationException($"Game with AppId '{request.AppId}' already exists");
-        }
 
-        return await base.CreateAsync(request);
+        var entity = MapToEntity(request);
+        await gameRepository.AddAsync(entity);
+
+        // Сохраняем снапшот в ClickHouse
+        await analyticsRepository.StoreGameAnalyticsAsync(entity);
+
+        return MapToResponse(entity);
     }
 
     // Специфичные методы для Game
@@ -382,6 +451,73 @@ public class GameService(
     }
 }
 
+public class AnalyticsService : IAnalyticsService
+{
+    private readonly IAnalyticsRepository _analyticsRepository;
+    private readonly ILogger<AnalyticsService> _logger;
+
+    public AnalyticsService(IAnalyticsRepository analyticsRepository, ILogger<AnalyticsService> logger)
+    {
+        _analyticsRepository = analyticsRepository;
+        _logger = logger;
+    }
+
+    public async Task<IEnumerable<GenreStatsResponse>> GetTopGenresAsync(string month)
+    {
+        if (!DateTime.TryParse($"{month}-01", out var monthDate))
+            throw new ArgumentException("month must be yyyy-MM");
+
+        var start = new DateTime(monthDate.Year, monthDate.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var end = start.AddMonths(1).AddTicks(-1);
+
+        var stats = await _analyticsRepository.GetGenreAnalyticsAsync(start, end);
+
+        return stats
+            .GroupBy(s => s.Genre)
+            .Select(g => new GenreStatsResponse
+            {
+                Genre = g.Key,
+                Games = g.Sum(x => x.GameCount),
+                AvgFollowers = Math.Round(g.Average(x => x.AvgFollowers))
+            })
+            .OrderByDescending(x => x.Games)
+            .Take(5)
+            .ToList();
+    }
+
+    public async Task<GenreDynamicsResultResponse> GetDynamicsAsync(string monthsCsv)
+    {
+        if (string.IsNullOrWhiteSpace(monthsCsv))
+            throw new ArgumentException("months required as csv yyyy-MM,...");
+
+        var monthList = monthsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                                 .Select(m => m.Trim())
+                                 .OrderBy(m => m)
+                                 .ToList();
+
+        var dynamics = await _analyticsRepository.GetGenreDynamicsAsync(monthList);
+
+        var grouped = dynamics.GroupBy(d => d.Genre);
+
+        var series = grouped.Select(g => new GenreDynamicsSeriesResponse
+        {
+            Genre = g.Key,
+            Counts = monthList.Select(m => g.Where(x => x.Month == m).Sum(x => x.GamesCount)).ToList(),
+            AvgFollowers = monthList.Select(m =>
+                g.Where(x => x.Month == m).Any()
+                    ? (int)Math.Round(g.Where(x => x.Month == m).Average(x => x.AvgFollowers))
+                    : 0
+            ).ToList()
+        }).ToList();
+
+        return new GenreDynamicsResultResponse
+        {
+            Months = monthList,
+            Series = series
+        };
+    }
+}
+
 public class SteamService : ISteamService
 {
     private readonly IGameRepository _gameRepository;
@@ -397,13 +533,44 @@ public class SteamService : ISteamService
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
     }
 
+    public async Task<IEnumerable<object>> GetTopGenresAsync(string month)
+    {
+        if (string.IsNullOrWhiteSpace(month))
+            throw new ArgumentException("month is required (yyyy-MM)", nameof(month));
+
+        if (!DateTime.TryParse($"{month}-01", out var monthDate))
+            throw new ArgumentException("month must be in format yyyy-MM", nameof(month));
+
+        // Диапазон месяца [start, end]
+        var startDate = new DateTime(monthDate.Year, monthDate.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+        var endDate = startDate.AddMonths(1).AddTicks(-1);
+
+        // Берём все игры за месяц
+        var games = await _gameRepository.GetGamesByDateRangeAsync(startDate, endDate);
+
+        // Считаем статистику по жанрам
+        var stats = games
+            .SelectMany(g => g.Genres.Select(genre => new { Genre = genre, Game = g }))
+            .GroupBy(x => x.Genre)
+            .Select(g => new
+            {
+                genre = g.Key,
+                games = g.Count(),
+                avgFollowers = (int)Math.Round(g.Average(x => x.Game.Followers))
+            })
+            .OrderByDescending(x => x.games)
+            .Take(5);
+
+        return stats.ToList();
+    }
 
     //-------------------------------------------------------------
     // Парсинг количества подписчиков(followers) со страницы магазина
     //-------------------------------------------------------------
 
 
-    private const string SteamSearchUrl = "https://store.steampowered.com/search/?sort_by=Released_DESC&category1=998&ndl=1&page={0}";
+    private const string SteamSearchUrl =
+        "https://store.steampowered.com/search/?sort_by=Released_DESC&category1=998&ndl=1&page={0}";
 
     /// <summary>
     /// Парсит страницы поиска Steam, собирает appId и дату релиза всех upcoming‑игр.
@@ -419,7 +586,7 @@ public class SteamService : ISteamService
         bool hasMore = true;
         int totalRowsProcessed = 0;
 
-        while (hasMore && page < 10) // Ограничим 10 страницами для теста
+        while (hasMore && page < 10) // TODO:Ограничим 10 страницами для теста
         {
             page++;
             var url = string.Format(SteamSearchUrl, page);
@@ -440,13 +607,15 @@ public class SteamService : ISteamService
 
                 if (rows == null || !rows.Any())
                 {
-                    _logger.LogWarning("❌ No game rows found on page {Page}. HTML might have different structure.", page);
+                    _logger.LogWarning("❌ No game rows found on page {Page}. HTML might have different structure.",
+                        page);
 
                     // Дамп небольшой части HTML для отладки
                     if (html.Length > 500)
                     {
                         _logger.LogDebug("First 500 chars of HTML: {HtmlSample}", html.Substring(0, 500));
                     }
+
                     break;
                 }
 
@@ -541,12 +710,14 @@ public class SteamService : ISteamService
 
         return results;
     }
+
     private static readonly Regex _monthYearRegex = new(@"(\w+)\s+(\d{4})", RegexOptions.Compiled);
     private static readonly Regex _yearOnlyRegex = new(@"\b(20\d{2})\b", RegexOptions.Compiled);
+
     private static readonly string[] _months =
     [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
     ];
 
     private static DateTime? ParseReleaseDate(string text)
@@ -582,22 +753,29 @@ public class SteamService : ISteamService
         }
 
         // Кварталы "Q4 2025"
-        if (text.Contains("Q4", StringComparison.OrdinalIgnoreCase) || text.Contains("4 Quarter", StringComparison.OrdinalIgnoreCase))
+        if (text.Contains("Q4", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("4 Quarter", StringComparison.OrdinalIgnoreCase))
         {
             var year = ExtractYear(text);
             return year.HasValue ? new DateTime(year.Value, 10, 1, 0, 0, 0, DateTimeKind.Utc) : null;
         }
-        if (text.Contains("Q3", StringComparison.OrdinalIgnoreCase) || text.Contains("3 Quarter", StringComparison.OrdinalIgnoreCase))
+
+        if (text.Contains("Q3", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("3 Quarter", StringComparison.OrdinalIgnoreCase))
         {
             var year = ExtractYear(text);
             return year.HasValue ? new DateTime(year.Value, 7, 1, 0, 0, 0, DateTimeKind.Utc) : null;
         }
-        if (text.Contains("Q2", StringComparison.OrdinalIgnoreCase) || text.Contains("2 Quarter", StringComparison.OrdinalIgnoreCase))
+
+        if (text.Contains("Q2", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("2 Quarter", StringComparison.OrdinalIgnoreCase))
         {
             var year = ExtractYear(text);
             return year.HasValue ? new DateTime(year.Value, 4, 1, 0, 0, 0, DateTimeKind.Utc) : null;
         }
-        if (text.Contains("Q1", StringComparison.OrdinalIgnoreCase) || text.Contains("1 Quarter", StringComparison.OrdinalIgnoreCase))
+
+        if (text.Contains("Q1", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("1 Quarter", StringComparison.OrdinalIgnoreCase))
         {
             var year = ExtractYear(text);
             return year.HasValue ? new DateTime(year.Value, 1, 1, 0, 0, 0, DateTimeKind.Utc) : null;
@@ -617,6 +795,7 @@ public class SteamService : ISteamService
         var match = _yearOnlyRegex.Match(text);
         return match.Success ? int.Parse(match.Value) : null;
     }
+
     public async Task SyncUpcomingGamesAsync(DateTime startDate, DateTime endDate)
     {
         _logger.LogInformation("🔄 Starting Steam sync for {StartDate:yyyy-MM} to {EndDate:yyyy-MM}",
@@ -676,6 +855,7 @@ public class SteamService : ISteamService
                             totalAdded++;
                             _logger.LogInformation("🎯 Added new game: {GameName}", game.Name);
                         }
+
                         totalProcessed++;
 
                         // ПАУЗА между запросами
@@ -691,7 +871,8 @@ public class SteamService : ISteamService
 
             await _gameRepository.SaveChangesAsync();
 
-            _logger.LogInformation("🎉 Sync completed: Processed={Processed}, Added={Added}, Updated={Updated}, Errors={Errors}",
+            _logger.LogInformation(
+                "🎉 Sync completed: Processed={Processed}, Added={Added}, Updated={Updated}, Errors={Errors}",
                 totalProcessed, totalAdded, totalUpdated, errorCount);
         }
         catch (Exception ex)
@@ -850,7 +1031,7 @@ public class SteamService : ISteamService
     private async Task<int> GetFollowersAsync(string appId)
     {
         const int maxRetries = 3;
-        const int delayMs = 1500;   // небольшая пауза между запросами – уважение к Steam
+        const int delayMs = 1500; // небольшая пауза между запросами – уважение к Steam
 
         var url = $"https://store.steampowered.com/app/{appId}/";
 
@@ -937,53 +1118,72 @@ public class SteamService : ISteamService
         return calendar;
     }
 
-    public async Task<IEnumerable<object>> GetTopGenresAsync()
+    public async Task<object> GetDynamicsAsync(string monthsCsv)
     {
-        var now = DateTime.UtcNow;
-        var start = new DateTime(now.Year, 11, 1); // Ноябрь
-        var end = start.AddMonths(1).AddDays(-1);
-        var top = await _gameRepository.GetTopGenresAsync(5, start, end);
+        if (string.IsNullOrWhiteSpace(monthsCsv))
+            throw new ArgumentException("months required as csv yyyy-MM,...", nameof(monthsCsv));
 
-        var list = new List<object>();
-        foreach (var kv in top) list.Add(new { genre = kv.Key, games = kv.Value.GamesCount, avgFollowers = kv.Value.AvgFollowers });
-
-        return list;
-    }
-
-    public async Task<object> GetDynamicsAsync()
-    {
-        var dynamics = await _gameRepository.GetGenreDynamicsAsync(3);
-
-        // 1. Группируем по жанру
-        var genreGroups = dynamics
-            .GroupBy(d => d.Genre)
-            .ToDictionary(g => g.Key, g => g.ToList());
-
-        // 2. Определяем все уникальные месяцы и сортируем
-        var allMonths = dynamics
-            .Select(d => d.Month.ToString("yyyy-MM"))
-            .Distinct()
-            .OrderBy(m => m)
+        var monthList = monthsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(m => m.Trim())
+            .OrderBy(m => m) // сортируем, чтобы было по порядку
             .ToList();
 
-        // 3. Строим datasets для Chart.js
-        var datasets = genreGroups.Select(kv => new
+        // Преобразуем в диапазон дат
+        var ranges = monthList.Select(m =>
         {
-            label = kv.Key,
-            data = allMonths.Select(month =>
-            {
-                var entry = kv.Value.FirstOrDefault(x => x.Month.ToString("yyyy-MM") == month);
-                // проверяем по умолчанию (Month == default)
-                return entry.Month != default ? Math.Round(entry.AvgFollowers, 1) : (double?)null;
-            }).ToArray()
+            if (!DateTime.TryParse($"{m}-01", out var parsed))
+                throw new ArgumentException($"Invalid month format: {m}");
+
+            var start = new DateTime(parsed.Year, parsed.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+            var end = start.AddMonths(1).AddTicks(-1);
+            return (start, end, label: m);
         }).ToList();
 
-        // 4. Возвращаем готовую структуру
-        return new
+        // Собираем игры за весь диапазон
+        var globalStart = ranges.Min(r => r.start);
+        var globalEnd = ranges.Max(r => r.end);
+
+        var allGames = await _gameRepository.GetGamesByDateRangeAsync(globalStart, globalEnd);
+
+        // Находим топ-5 жанров по количеству игр
+        var topGenres = allGames
+            .SelectMany(g => g.Genres.Select(genre => new { Genre = genre, Game = g }))
+            .GroupBy(x => x.Genre)
+            .OrderByDescending(g => g.Count())
+            .Take(5)
+            .Select(g => g.Key)
+            .ToList();
+
+        // Формируем динамику
+        var series = new List<object>();
+        foreach (var genre in topGenres)
         {
-            labels = allMonths,
-            datasets = datasets
-        };
+            var counts = new List<int>();
+            var avgFollowers = new List<int>();
+
+            foreach (var (start, end, label) in ranges)
+            {
+                var gamesInMonth = allGames
+                    .Where(g => g.ReleaseDate >= start && g.ReleaseDate <= end && g.Genres.Contains(genre))
+                    .ToList();
+
+                counts.Add(gamesInMonth.Count);
+
+                if (gamesInMonth.Count > 0)
+                {
+                    var avg = gamesInMonth.Average(g => g.Followers);
+                    avgFollowers.Add((int)Math.Round(avg));
+                }
+                else
+                {
+                    avgFollowers.Add(0);
+                }
+            }
+
+            series.Add(new { genre, counts, avgFollowers });
+        }
+
+        return new { months = monthList, series };
     }
 }
 
@@ -1010,7 +1210,8 @@ public class JwtService : IJwtService
             Expires = DateTime.UtcNow.AddMinutes(_jwtSettings.ExpirationMinutes),
             Issuer = _jwtSettings.Issuer,
             Audience = _jwtSettings.Audience,
-            SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
+            SigningCredentials =
+                new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256Signature)
         };
 
         var token = tokenHandler.CreateToken(tokenDescriptor);
@@ -1072,10 +1273,10 @@ public class SteamBackgroundService : BackgroundService
                     var steamService = scope.ServiceProvider.GetRequiredService<ISteamService>();
 
                     var now = DateTime.UtcNow;
-                    //var startDate = now.AddMonths(-1); // Игры от месяца назад
-                    //var endDate = now.AddYears(1);     // Игры до года вперед
-                    var startDate = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);  // Начало 2024
-                    var endDate = new DateTime(2026, 12, 31, 23, 59, 59, DateTimeKind.Utc); // Конец 2026
+                    var startDate = now.AddYears(-1); // Игры старше года
+                    var endDate = now.AddYears(1); // Игры выйдут через год
+                    //var startDate = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);  // Начало 2024
+                    //var endDate = new DateTime(2026, 12, 31, 23, 59, 59, DateTimeKind.Utc); // Конец 2026
 
                     await steamService.SyncUpcomingGamesAsync(startDate, endDate);
                 }

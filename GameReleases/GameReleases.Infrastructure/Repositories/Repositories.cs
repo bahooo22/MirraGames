@@ -1,11 +1,15 @@
 ﻿using System.Linq.Expressions;
 
+using ClickHouse.Client.ADO;
+using ClickHouse.Client.ADO.Parameters;
+
 using GameReleases.Infrastructure.Data;
 using GameReleases.Infrastructure.DTO;
 using GameReleases.Infrastructure.Entities;
 using GameReleases.Infrastructure.Interfaces;
 
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 
 namespace GameReleases.Infrastructure.Repositories;
 
@@ -111,10 +115,11 @@ public class Repository<TEntity> : IRepository<TEntity> where TEntity : class
     }
 
     // Update
-    public virtual TEntity Update(TEntity entity)
+    public virtual async Task<TEntity> UpdateAsync(TEntity entity)
     {
-        var entry = _dbSet.Update(entity);
-        return entry.Entity;
+        _dbSet.Update(entity);
+        await _context.SaveChangesAsync();
+        return entity;
     }
 
     public virtual void UpdateRange(IEnumerable<TEntity> entities)
@@ -150,6 +155,233 @@ public class Repository<TEntity> : IRepository<TEntity> where TEntity : class
     {
         await _context.SaveChangesAsync();
     }
+}
+
+public class AnalyticsRepository : IAnalyticsRepository
+{
+    private readonly ClickHouseContext _context;
+
+    public AnalyticsRepository(ClickHouseContext context)
+    {
+        _context = context;
+    }
+
+    public async Task StoreGameAnalyticsAsync(Game game)
+    {
+        // Таблица в ClickHouse: game_snapshots
+        // Структура: AppId String, Name String, Genre String, Followers Int32, CollectedAt DateTime
+
+        foreach (var genre in game.Genres)
+        {
+            var query = $@"
+                INSERT INTO game_snapshots (AppId, Name, Genre, Followers, CollectedAt)
+                VALUES ('{game.AppId}', '{game.Name.Replace("'", "''")}', '{genre.Replace("'", "''")}', {game.Followers}, now())";
+
+            await _context.ExecuteNonQueryAsync(query);
+        }
+    }
+
+    public async Task<List<GenreAnalytics>> GetGenreAnalyticsAsync(DateTime startDate, DateTime endDate)
+    {
+        var query = $@"
+            SELECT 
+                Genre,
+                COUNT(*) AS GameCount,
+                AVG(Followers) AS AvgFollowers,
+                toStartOfMonth(CollectedAt) AS Period
+            FROM game_snapshots
+            WHERE CollectedAt BETWEEN '{startDate:yyyy-MM-dd}' AND '{endDate:yyyy-MM-dd}'
+            GROUP BY Genre, Period
+            ORDER BY Period, GameCount DESC
+        ";
+
+        return await _context.ExecuteQueryAsync<GenreAnalytics>(query);
+    }
+
+    public async Task<List<DailyReleaseCount>> GetDailyReleasesAsync(DateTime startDate, DateTime endDate)
+    {
+        var query = $@"
+            SELECT 
+                toDate(ReleaseDate) AS Date,
+                COUNT(*) AS Count
+            FROM games
+            WHERE ReleaseDate BETWEEN '{startDate:yyyy-MM-dd}' AND '{endDate:yyyy-MM-dd}'
+            GROUP BY Date
+            ORDER BY Date
+        ";
+
+        return await _context.ExecuteQueryAsync<DailyReleaseCount>(query);
+    }
+
+    public async Task<List<GenreDynamics>> GetGenreDynamicsAsync(IEnumerable<string> months)
+    {
+        var monthsCsv = string.Join(",", months.Select(m => $"'{m}'"));
+
+        var query = $@"
+            SELECT 
+                arrayJoin(Genres) AS Genre,
+                formatDateTime(ReleaseDate, '%Y-%m') AS Month,
+                COUNT(*) AS GamesCount,
+                AVG(Followers) AS AvgFollowers
+            FROM games
+            WHERE formatDateTime(ReleaseDate, '%Y-%m') IN ({monthsCsv})
+            GROUP BY Genre, Month
+            ORDER BY Month, GamesCount DESC
+        ";
+
+        return await _context.ExecuteQueryAsync<GenreDynamics>(query);
+    }
+}
+
+public class ClickHouseAnalyticsRepository : IAnalyticsRepository
+{
+    private readonly string _connectionString;
+
+    public ClickHouseAnalyticsRepository(IConfiguration configuration)
+    {
+        _connectionString = configuration.GetConnectionString("ClickHouse")
+                            ?? throw new InvalidOperationException("ClickHouse connection string not configured");
+    }
+
+    /// <summary>
+    /// Сохраняет снапшот игры в ClickHouse (по жанрам).
+    /// </summary>
+    public async Task StoreGameAnalyticsAsync(Game game)
+    {
+        await using var conn = new ClickHouseConnection(_connectionString);
+        await conn.OpenAsync();
+
+        var sql = @"INSERT INTO game_analytics 
+                    (CollectedAt, Genre, GamesCount, AvgFollowers, Month)
+                    VALUES (@collectedAt, @genre, @gamesCount, @avgFollowers, @month)";
+
+        foreach (var genre in game.Genres)
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "collectedAt", Value = game.CollectedAt });
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "genre", Value = genre });
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "gamesCount", Value = 1 });
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "avgFollowers", Value = game.Followers });
+            cmd.Parameters.Add(new ClickHouseDbParameter
+            { ParameterName = "month", Value = game.ReleaseDate?.ToString("yyyy-MM") ?? "" });
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    /// <summary>
+    /// Возвращает агрегированную статистику по жанрам за период.
+    /// </summary>
+    public async Task<List<GenreAnalytics>> GetGenreAnalyticsAsync(DateTime startDate, DateTime endDate)
+    {
+        var result = new List<GenreAnalytics>();
+
+        await using var conn = new ClickHouseConnection(_connectionString);
+        await conn.OpenAsync();
+
+        var sql = @"SELECT Genre,
+                           count() AS GameCount,
+                           avg(AvgFollowers) AS AvgFollowers,
+                           toStartOfMonth(CollectedAt) AS Period
+                    FROM game_analytics
+                    WHERE CollectedAt BETWEEN @start AND @end
+                    GROUP BY Genre, Period
+                    ORDER BY Period, GameCount DESC";
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "start", Value = startDate });
+        cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "end", Value = endDate });
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new GenreAnalytics
+            {
+                Genre = reader.GetString(0),
+                GameCount = reader.GetInt32(1),
+                AvgFollowers = reader.GetDouble(2),
+                Period = reader.GetDateTime(3)
+            });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Возвращает количество релизов по дням.
+    /// </summary>
+    public async Task<List<DailyReleaseCount>> GetDailyReleasesAsync(DateTime startDate, DateTime endDate)
+    {
+        var result = new List<DailyReleaseCount>();
+
+        await using var conn = new ClickHouseConnection(_connectionString);
+        await conn.OpenAsync();
+
+        var sql = @"SELECT toDate(ReleaseDate) AS Date, count() AS Count
+                    FROM games
+                    WHERE ReleaseDate BETWEEN @start AND @end
+                    GROUP BY Date
+                    ORDER BY Date";
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "start", Value = startDate });
+        cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "end", Value = endDate });
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new DailyReleaseCount
+            {
+                Date = reader.GetDateTime(0),
+                Count = reader.GetInt32(1)
+            });
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Возвращает динамику по жанрам за несколько месяцев.
+    /// </summary>
+    public async Task<List<GenreDynamics>> GetGenreDynamicsAsync(IEnumerable<string> months)
+    {
+        var result = new List<GenreDynamics>();
+
+        await using var conn = new ClickHouseConnection(_connectionString);
+        await conn.OpenAsync();
+
+        var sql = @"SELECT arrayJoin(Genres) AS Genre,
+                           formatDateTime(ReleaseDate, '%Y-%m') AS Month,
+                           count() AS GamesCount,
+                           avg(Followers) AS AvgFollowers
+                    FROM games
+                    WHERE formatDateTime(ReleaseDate, '%Y-%m') IN @months
+                    GROUP BY Genre, Month
+                    ORDER BY Month, GamesCount DESC";
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "months", Value = months.ToArray() });
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new GenreDynamics
+            {
+                Genre = reader.GetString(0),
+                Month = reader.GetString(1),
+                GamesCount = reader.GetInt32(2),
+                AvgFollowers = reader.GetDouble(3)
+            });
+        }
+
+        return result;
+    }
+
+
 }
 public class GameRepository(AppDbContext context) : Repository<Game>(context), IGameRepository
 {
@@ -198,10 +430,12 @@ public class GameRepository(AppDbContext context) : Repository<Game>(context), I
     public async Task<Game?> GetByAppIdAsync(string appId, DateTime? collectedAt = null)
     {
         collectedAt ??= DateTime.UtcNow.Date; // По умолчанию сегодняшний
-        return await context.Games.FirstOrDefaultAsync(g => g.AppId == appId && g.CollectedAt.Date == collectedAt.Value.Date);
+        return await context.Games.FirstOrDefaultAsync(g =>
+            g.AppId == appId && g.CollectedAt.Date == collectedAt.Value.Date);
     }
 
-    public async Task<IEnumerable<Game>> GetUpcomingGamesAsync(DateTime startDate, DateTime endDate, string platform = null, string genre = null)
+    public async Task<IEnumerable<Game>> GetUpcomingGamesAsync(DateTime startDate, DateTime endDate,
+        string platform = null, string genre = null)
     {
         var utcStartDate = startDate.Kind == DateTimeKind.Unspecified
             ? DateTime.SpecifyKind(startDate, DateTimeKind.Utc)
@@ -229,7 +463,8 @@ public class GameRepository(AppDbContext context) : Repository<Game>(context), I
         return await GetUpcomingGamesAsync(start, end);
     }
 
-    public async Task<IDictionary<string, (int GamesCount, double AvgFollowers)>> GetTopGenresAsync(int topCount, DateTime startDate, DateTime endDate)
+    public async Task<IDictionary<string, (int GamesCount, double AvgFollowers)>> GetTopGenresAsync(int topCount,
+        DateTime startDate, DateTime endDate)
     {
         var utcStartDate = startDate.Kind == DateTimeKind.Unspecified
             ? DateTime.SpecifyKind(startDate, DateTimeKind.Utc)
@@ -259,7 +494,8 @@ public class GameRepository(AppDbContext context) : Repository<Game>(context), I
         return genreStats;
     }
 
-    public async Task<IEnumerable<(string Genre, DateTime Month, int GamesCount, double AvgFollowers)>> GetGenreDynamicsAsync(int monthsBack)
+    public async Task<IEnumerable<(string Genre, DateTime Month, int GamesCount, double AvgFollowers)>>
+        GetGenreDynamicsAsync(int monthsBack)
     {
         var now = DateTime.UtcNow;
         var start = now.AddMonths(-monthsBack + 1).Date; // e.g., for 3 months: sept-oct-nov
@@ -273,7 +509,8 @@ public class GameRepository(AppDbContext context) : Repository<Game>(context), I
             .SelectMany(monthGroup => monthGroup.SelectMany(g => g.Genres).GroupBy(genre => genre)
                 .Select(genreGroup => (Genre: genreGroup.Key, Month: monthGroup.Key.Month,
                     GamesCount: genreGroup.Count(),
-                    AvgFollowers: monthGroup.Where(g => g.Genres.Contains(genreGroup.Key)).Average(g => g.Followers))))
+                    AvgFollowers: monthGroup.Where(g => g.Genres.Contains(genreGroup.Key))
+                        .Average(g => g.Followers))))
             .ToHashSet();
 
         return dynamics;
@@ -295,7 +532,11 @@ public class GameRepository(AppDbContext context) : Repository<Game>(context), I
             .Where(g => g.ReleaseDate >= startDate && g.ReleaseDate <= endDate)
             .Where(g => g.ReleaseDate.HasValue) // Добавляем проверку на null
             .GroupBy(g => g.ReleaseDate!.Value.Date) // Используем ! для уверенности что не null
-            .Select(g => new DailyReleaseCount(g.Key, g.Count()))
+            .Select(g => new DailyReleaseCount
+            {
+                Date = g.Key,
+                Count = g.Count()
+            })
             .OrderBy(x => x.Date)
             .ToListAsync();
     }
@@ -334,12 +575,13 @@ public class GameRepository(AppDbContext context) : Repository<Game>(context), I
                 Genre = g.Genres.FirstOrDefault(), // Берем первый жанр для упрощения
                 Month = new DateTime(g.CollectedAt.Year, g.CollectedAt.Month, 1)
             })
-            .Select(g => new GenreDynamics(
-                g.Key.Genre ?? "Unknown",
-                g.Key.Month.ToString("yyyy-MM"),
-                g.Count(),
-                g.Average(x => x.Followers)
-            ))
+            .Select(g => new GenreDynamics
+            {
+                Genre = g.Key.Genre ?? "Unknown",
+                Month = g.Key.Month.ToString("yyyy-MM"),
+                GamesCount = g.Count(),
+                AvgFollowers = g.Average(x => x.Followers)
+            })
             .OrderBy(g => g.Month)
             .ThenByDescending(g => g.GamesCount)
             .ToList();

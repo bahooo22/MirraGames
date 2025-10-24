@@ -29,7 +29,7 @@ public interface IRepository<TEntity> where TEntity : class
     Task<IEnumerable<TEntity>> AddRangeAsync(IEnumerable<TEntity> entities);
 
     // Update
-    TEntity Update(TEntity entity);
+    Task<TEntity> UpdateAsync(TEntity entity);
     void UpdateRange(IEnumerable<TEntity> entities);
 
     // Delete
@@ -48,24 +48,36 @@ public interface IGameRepository : IRepository<Game>
     Task<IEnumerable<Game>> GetByGenreAsync(string genre);
     Task<IEnumerable<Game>> GetRecentGamesAsync(int days = 7);
     Task<IEnumerable<Game>> GetPopularGamesAsync(int count = 10);
-    new Task<Game> AddAsync(Game game);
-    Task UpdateAsync(Game game);
-    Task<IEnumerable<Game>> GetUpcomingGamesAsync(DateTime startDate, DateTime endDate, string platform = null, string genre = null);
+    Task<IEnumerable<Game>> GetUpcomingGamesAsync(
+        DateTime startDate,
+        DateTime endDate,
+        string? platform = null,
+        string? genre = null);
     Task<IEnumerable<Game>> GetGamesByMonthAsync(int year, int month);
-    Task<IDictionary<string, (int GamesCount, double AvgFollowers)>> GetTopGenresAsync(int topCount, DateTime startDate, DateTime endDate);
-    Task<IEnumerable<(string Genre, DateTime Month, int GamesCount, double AvgFollowers)>> GetGenreDynamicsAsync(int monthsBack);
-
-    // Новые методы для аналитики
     Task<IEnumerable<Game>> GetGamesByDateRangeAsync(DateTime startDate, DateTime endDate);
-    Task<IEnumerable<DailyReleaseCount>> GetDailyReleaseCountsAsync(int year, int month);
-    Task<IEnumerable<GenreStats>> GetGenreStatisticsAsync(DateTime startDate, DateTime endDate);
-    Task<IEnumerable<GenreDynamics>> GetGenreDynamicsByMonthAsync(int monthsBack = 3);
 }
 
 public interface IAnalyticsRepository
 {
+    /// <summary>
+    /// Сохраняет снапшот игры в ClickHouse (для последующего анализа динамики).
+    /// </summary>
     Task StoreGameAnalyticsAsync(Game game);
+
+    /// <summary>
+    /// Возвращает агрегированную статистику по жанрам за указанный период.
+    /// </summary>
     Task<List<GenreAnalytics>> GetGenreAnalyticsAsync(DateTime startDate, DateTime endDate);
+
+    /// <summary>
+    /// Возвращает количество релизов по дням в заданном диапазоне.
+    /// </summary>
+    Task<List<DailyReleaseCount>> GetDailyReleasesAsync(DateTime startDate, DateTime endDate);
+
+    /// <summary>
+    /// Возвращает динамику по жанрам за несколько месяцев.
+    /// </summary>
+    Task<List<GenreDynamics>> GetGenreDynamicsAsync(IEnumerable<string> months);
 }
 
-public record GenreAnalytics(string Genre, int GameCount, double AvgFollowers, DateTime Period);
+

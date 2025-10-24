@@ -7,7 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 namespace GameReleases.WebApi.Controllers;
 
 [ApiController]
-[Route("api/[controller]")]
+[Route("api/v1/[controller]")]
 [Produces("application/json")]
 public class GamesController : ControllerBase
 {
@@ -126,6 +126,47 @@ public class GamesController : ControllerBase
         {
             _logger.LogError(ex, "Error deleting game with ID: {Id}", id);
             return StatusCode(500, "An error occurred while deleting the game");
+        }
+    }
+
+    // Список релизов за месяц с фильтрацией по платформе и жанру
+    [HttpGet("releases")]
+    public async Task<ActionResult<IEnumerable<GameResponse>>> GetReleases(
+        [FromQuery] string month,
+        [FromQuery] string? platform = null,
+        [FromQuery] string? genre = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(month))
+                return BadRequest("month is required in format yyyy-MM");
+
+            var releases = await _gameService.GetReleasesAsync(month, platform, genre);
+            return Ok(releases);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting releases for month {Month}", month);
+            return StatusCode(500, "An error occurred while retrieving releases");
+        }
+    }
+
+    // Календарь релизов: количество игр по дням в указанном месяце
+    [HttpGet("calendar")]
+    public async Task<ActionResult<IEnumerable<object>>> GetCalendar([FromQuery] string month)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(month))
+                return BadRequest("month is required in format yyyy-MM");
+
+            var calendar = await _gameService.GetCalendarAsync(month);
+            return Ok(calendar);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting calendar for month {Month}", month);
+            return StatusCode(500, "An error occurred while retrieving calendar");
         }
     }
 }
