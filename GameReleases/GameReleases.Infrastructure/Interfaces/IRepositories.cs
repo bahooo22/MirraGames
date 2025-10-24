@@ -48,8 +48,7 @@ public interface IGameRepository : IRepository<Game>
     Task<IEnumerable<Game>> GetByGenreAsync(string genre);
     Task<IEnumerable<Game>> GetRecentGamesAsync(int days = 7);
     Task<IEnumerable<Game>> GetPopularGamesAsync(int count = 10);
-    Task<IEnumerable<Game>> GetUpcomingGamesAsync(
-        DateTime startDate,
+    Task<IEnumerable<Game>> GetUpcomingGamesAsync(DateTime startDate,
         DateTime endDate,
         string? platform = null,
         string? genre = null);

@@ -2,6 +2,7 @@
 using GameReleases.Core.DTO;
 using GameReleases.Core.Interfaces;
 
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace GameReleases.WebApi.Controllers;
@@ -21,6 +22,7 @@ public class GamesController : ControllerBase
     }
 
     [HttpGet]
+    [AllowAnonymous]
     public async Task<ActionResult<PagedResponse<GameResponse>>> GetGames(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 20,
@@ -41,6 +43,7 @@ public class GamesController : ControllerBase
     }
 
     [HttpGet("{id:guid}")]
+    [AllowAnonymous]
     public async Task<ActionResult<GameResponse>> GetGame(Guid id)
     {
         try
@@ -56,6 +59,7 @@ public class GamesController : ControllerBase
     }
 
     [HttpGet("app/{appId}")]
+    [AllowAnonymous]
     public async Task<ActionResult<GameResponse>> GetGameByAppId(string appId)
     {
         try
@@ -71,6 +75,7 @@ public class GamesController : ControllerBase
     }
 
     [HttpPost]
+    [Authorize]
     public async Task<ActionResult<GameResponse>> CreateGame(CreateGameRequest request)
     {
         try
@@ -95,6 +100,7 @@ public class GamesController : ControllerBase
     }
 
     [HttpPut("{id:guid}")]
+    [Authorize]
     public async Task<ActionResult<GameResponse>> UpdateGame(Guid id, UpdateGameRequest request)
     {
         try
@@ -115,6 +121,7 @@ public class GamesController : ControllerBase
     }
 
     [HttpDelete("{id:guid}")]
+    [Authorize]
     public async Task<IActionResult> DeleteGame(Guid id)
     {
         try
@@ -129,8 +136,15 @@ public class GamesController : ControllerBase
         }
     }
 
-    // Список релизов за месяц с фильтрацией по платформе и жанру
+    /// <summary>
+    /// Список релизов за месяц с фильтрацией по платформе и жанру
+    /// </summary>
+    /// <param name="month"></param>
+    /// <param name="platform"></param>
+    /// <param name="genre"></param>
+    /// <returns></returns>
     [HttpGet("releases")]
+    [AllowAnonymous]
     public async Task<ActionResult<IEnumerable<GameResponse>>> GetReleases(
         [FromQuery] string month,
         [FromQuery] string? platform = null,
@@ -151,8 +165,13 @@ public class GamesController : ControllerBase
         }
     }
 
-    // Календарь релизов: количество игр по дням в указанном месяце
+    /// <summary>
+    /// Календарь релизов: количество игр по дням в указанном месяце
+    /// </summary>
+    /// <param name="month"></param>
+    /// <returns></returns>
     [HttpGet("calendar")]
+    [AllowAnonymous]
     public async Task<ActionResult<IEnumerable<object>>> GetCalendar([FromQuery] string month)
     {
         try
@@ -168,5 +187,22 @@ public class GamesController : ControllerBase
             _logger.LogError(ex, "Error getting calendar for month {Month}", month);
             return StatusCode(500, "An error occurred while retrieving calendar");
         }
+    }
+
+    /// <summary>
+    /// Псевдоним для соответствия ТЗ: GET /api/v1/games?month=yyyy-MM
+    /// </summary>
+    /// <param name="month"></param>
+    /// <param name="platform"></param>
+    /// <param name="genre"></param>
+    /// <returns></returns>
+    [HttpGet]
+    [AllowAnonymous]
+    public async Task<ActionResult<IEnumerable<GameResponse>>> GetReleasesAlias(
+        [FromQuery] string month,
+        [FromQuery] string? platform = null,
+        [FromQuery] string? genre = null)
+    {
+        return await GetReleases(month, platform, genre);
     }
 }

@@ -1,6 +1,7 @@
 ﻿using GameReleases.Core.DTO;
 using GameReleases.Core.Interfaces;
 
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 [ApiController]
@@ -18,6 +19,7 @@ public class AnalyticsController : ControllerBase
     }
 
     [HttpGet("top-genres")]
+    [AllowAnonymous]
     public async Task<ActionResult<IEnumerable<GenreStatsResponse>>> GetTopGenres([FromQuery] string month)
     {
         var topGenres = await _analyticsService.GetTopGenresAsync(month);
@@ -25,6 +27,7 @@ public class AnalyticsController : ControllerBase
     }
 
     [HttpGet("dynamics")]
+    [AllowAnonymous]
     public async Task<ActionResult<GenreDynamicsResultResponse>> GetDynamics([FromQuery] string months)
     {
         var dynamics = await _analyticsService.GetDynamicsAsync(months);

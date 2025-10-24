@@ -148,7 +148,7 @@ public abstract class Services<TEntity, TId, TCreateRequest, TUpdateRequest, TRe
             }
 
             UpdateEntity(entity, request);
-            _repository.UpdateAsync(entity);
+            await _repository.UpdateAsync(entity);
             await _repository.SaveChangesAsync();
 
             return MapToResponse(entity);
@@ -1150,18 +1150,48 @@ public class JwtService : IJwtService
     }
 }
 
-public class SteamBackgroundService : BackgroundService
+public class SteamSyncService : ISteamSyncService
 {
     private readonly IServiceProvider _serviceProvider;
+
+    private readonly ILogger<SteamSyncService> _logger;
+    public SteamSyncService(
+        IServiceProvider serviceProvider,
+        ILogger<SteamSyncService> logger)
+    {
+        _serviceProvider = serviceProvider;
+        _logger = logger;
+    }
+    public async Task SyncAsync(CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Starting Steam data synchronization...");
+
+        using var scope = _serviceProvider.CreateScope();
+        var steamService = scope.ServiceProvider.GetRequiredService<ISteamService>();
+
+        var now = DateTime.UtcNow;
+        var startDate = now.AddYears(-1);
+        var endDate = now.AddYears(1);
+
+        // Запускаем синхронизацию (сама обновит/создаст игры и подтянет followers)
+        await steamService.SyncUpcomingGamesAsync(startDate, endDate);
+
+        _logger.LogInformation("Steam data synchronization completed successfully");
+    }
+}
+
+public class SteamBackgroundService : BackgroundService
+{
+    readonly ISteamSyncService _syncService;
     private readonly ILogger<SteamBackgroundService> _logger;
     private readonly TimeSpan _syncInterval = TimeSpan.FromHours(6);
 
     public SteamBackgroundService(
-        IServiceProvider serviceProvider,
+        ISteamSyncService syncService,
         ILogger<SteamBackgroundService> logger)
     {
-        _serviceProvider = serviceProvider;
         _logger = logger;
+        _syncService = syncService;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -1170,19 +1200,7 @@ public class SteamBackgroundService : BackgroundService
         {
             try
             {
-                _logger.LogInformation("Starting Steam data synchronization...");
-
-                using var scope = _serviceProvider.CreateScope();
-                var steamService = scope.ServiceProvider.GetRequiredService<ISteamService>();
-
-                var now = DateTime.UtcNow;
-                var startDate = now.AddYears(-1);
-                var endDate = now.AddYears(1);
-
-                // Запускаем синхронизацию (сама обновит/создаст игры и подтянет followers)
-                await steamService.SyncUpcomingGamesAsync(startDate, endDate);
-
-                _logger.LogInformation("Steam data synchronization completed successfully");
+                await _syncService.SyncAsync(stoppingToken);
             }
             catch (Exception ex)
             {

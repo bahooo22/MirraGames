@@ -1,6 +1,5 @@
 ﻿using GameReleases.Core;
 using GameReleases.Infrastructure;
-using GameReleases.Infrastructure.Data;
 
 using Microsoft.EntityFrameworkCore;
 
@@ -14,12 +13,6 @@ builder.Services.AddSwaggerGen();
 // Регистрация слоя доступа к данным
 builder.Services.AddDataAccess(
     builder.Configuration.GetConnectionString("DefaultConnection")!);
-builder.Services.AddSingleton<ClickHouseContext>(sp =>
-{
-    var connStr = builder.Configuration.GetConnectionString("ClickHouseConnection")
-                  ?? throw new InvalidOperationException("ClickHouse connection string not found");
-    return new ClickHouseContext(connStr);
-});
 
 // Регистрация сервисов приложения
 builder.Services.AddApplicationServices();
@@ -34,6 +27,7 @@ if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
+    app.MapGet("/", () => Results.Redirect("/swagger"));
 }
 
 app.UseHttpsRedirection();

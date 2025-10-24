@@ -54,6 +54,7 @@ public static class CoreExtensions
         // Аналитический сервис
         services.AddScoped<IAnalyticsService, AnalyticsService>();
 
+        services.AddScoped<ISteamSyncService, SteamSyncService>();
 
         return services;
     }

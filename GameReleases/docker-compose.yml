@@ -4,11 +4,21 @@ services:
       context: .
       dockerfile: GameReleases.WebApi/Dockerfile
     ports:
-      - "8080:8080"
+      - "8080:80"   # HTTP доступ
+      - "443:443"   # HTTPS доступ
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
       - ConnectionStrings__DefaultConnection=Host=postgres;Port=5432;Database=game_releases;Username=postgres;Password=1234
-      - ConnectionStrings__ClickHouseConnection=Host=clickhouse;Port=8123;Database=game_releases;Username=default;Password=
+      - ConnectionStrings__ClickHouseConnection=Host=clickhouse;Port=8123;Database=game_analytics;Username=default;Password=
+      - JwtSettings__Secret=your-super-secret-key-at-least-32-characters-long
+      - JwtSettings__Issuer=GameReleasesAPI
+      - JwtSettings__Audience=GameReleasesClient
+      - JwtSettings__ExpirationMinutes=60
+      # Настройки для dev-сертификата
+      - ASPNETCORE_Kestrel__Certificates__Default__Password=yourpassword
+      - ASPNETCORE_Kestrel__Certificates__Default__Path=/root/.aspnet/https/GameReleases.WebApi.pfx
+    volumes:
+      - ${USERPROFILE}\.aspnet\https:/root/.aspnet/https:ro
     depends_on:
       - postgres
       - clickhouse
@@ -18,14 +28,16 @@ services:
   migrate:
     build:
       context: .
-      dockerfile: Dockerfile.migrate
-    networks:
-      - game-network
+      dockerfile: GameReleases.WebApi/Dockerfile.migrate
+    command: ["dotnet", "ef", "database", "update", "--project", "GameReleases.Infrastructure"]
     depends_on:
       - postgres
+    networks:
+      - game-network
+
 
   postgres:
-    image: postgres:13
+    image: postgres:16
     environment:
       POSTGRES_DB: game_releases
       POSTGRES_USER: postgres
@@ -40,7 +52,7 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     environment:
-      CLICKHOUSE_DB: game_releases
+      CLICKHOUSE_DB: game_analytics
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: ""
     ports:
@@ -48,7 +60,6 @@ services:
       - "9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
-      - ./clickhouse-config.xml:/etc/clickhouse-server/config.d/logging.xml:ro
     ulimits:
       nofile:
         soft: 262144
@@ -59,7 +70,8 @@ services:
 volumes:
   postgres_data:
   clickhouse_data:
-
+  playwright-cache:
+  
 networks:
   game-network:
     driver: bridge

@@ -77,6 +77,11 @@ public interface ISteamService
     Task<object> GetDynamicsAsync(string month); // Динамика за 3 месяца
 }
 
+public interface ISteamSyncService
+{
+    Task SyncAsync(CancellationToken cancellationToken = default);
+}
+
 public interface IJwtService
 {
     string GenerateToken(string username);

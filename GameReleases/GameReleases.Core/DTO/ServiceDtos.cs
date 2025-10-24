@@ -1,37 +1,69 @@
-﻿namespace GameReleases.Core.DTO;
+﻿using System.ComponentModel.DataAnnotations;
 
-// =======================
-// Request DTOs
-// =======================
+namespace GameReleases.Core.DTO;
+
+/// <summary>
+/// Request DTOs
+/// </summary>
 
 public class CreateGameRequest
 {
+    [Required, StringLength(50)]
     public string AppId { get; set; } = string.Empty;
+
+    [Required, StringLength(200)]
     public string Name { get; set; } = string.Empty;
+
     public DateTime? ReleaseDate { get; set; }
+
+    [MinLength(1, ErrorMessage = "At least one genre is required")]
     public ICollection<string> Genres { get; set; } = [];
+
+    [Range(0, int.MaxValue, ErrorMessage = "Followers must be non-negative")]
     public int Followers { get; set; }
+
+    [Required, Url]
     public string StoreUrl { get; set; } = string.Empty;
+
+    [Url]
     public string PosterUrl { get; set; } = string.Empty;
+
+    [StringLength(1000)]
     public string ShortDescription { get; set; } = string.Empty;
+
+    [MinLength(1, ErrorMessage = "At least one platform is required")]
     public ICollection<string> Platforms { get; set; } = [];
 }
 
 public class UpdateGameRequest
 {
+    [Required, StringLength(200)]
     public string Name { get; set; } = string.Empty;
+
     public DateTime? ReleaseDate { get; set; }
+
+    [MinLength(1)]
     public ICollection<string> Genres { get; set; } = [];
+
+    [Range(0, int.MaxValue)]
     public int Followers { get; set; }
+
+    [Required, Url]
     public string StoreUrl { get; set; } = string.Empty;
+
+    [Url]
     public string PosterUrl { get; set; } = string.Empty;
+
+    [StringLength(1000)]
     public string ShortDescription { get; set; } = string.Empty;
+
+    [MinLength(1)]
     public ICollection<string> Platforms { get; set; } = [];
 }
 
-// =======================
-// Response DTOs
-// =======================
+/// <summary>
+/// Response DTOs
+/// </summary>
 
 public class GameResponse
 {
@@ -64,9 +96,9 @@ public class GameResponse
         };
 }
 
-// =======================
-// Analytics DTOs
-// =======================
+/// <summary>
+/// Analytics DTOs
+/// </summary>
 
 public class CalendarDayResponse
 {
@@ -93,9 +125,9 @@ public class GenreDynamicsResponse
     public ICollection<GenreStatsResponse> TopGenres { get; set; } = [];
 }
 
-// =======================
-// Вспомогательные DTO
-// =======================
+/// <summary>
+/// Вспомогательные DTO
+/// </summary>
 
 public class SteamSearchResult
 {
