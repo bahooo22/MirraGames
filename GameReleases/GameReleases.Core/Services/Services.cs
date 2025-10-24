@@ -1247,10 +1247,9 @@ public class JwtService : IJwtService
 
 public class SteamBackgroundService : BackgroundService
 {
-    private readonly ISteamService _steamService;
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<SteamBackgroundService> _logger;
-    private readonly TimeSpan _syncInterval = TimeSpan.FromHours(6); // Синхронизация каждые 6 часов
+    private readonly TimeSpan _syncInterval = TimeSpan.FromHours(6);
 
     public SteamBackgroundService(
         IServiceProvider serviceProvider,
@@ -1268,18 +1267,15 @@ public class SteamBackgroundService : BackgroundService
             {
                 _logger.LogInformation("Starting Steam data synchronization...");
 
-                using (var scope = _serviceProvider.CreateScope())
-                {
-                    var steamService = scope.ServiceProvider.GetRequiredService<ISteamService>();
+                using var scope = _serviceProvider.CreateScope();
+                var steamService = scope.ServiceProvider.GetRequiredService<ISteamService>();
 
-                    var now = DateTime.UtcNow;
-                    var startDate = now.AddYears(-1); // Игры старше года
-                    var endDate = now.AddYears(1); // Игры выйдут через год
-                    //var startDate = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);  // Начало 2024
-                    //var endDate = new DateTime(2026, 12, 31, 23, 59, 59, DateTimeKind.Utc); // Конец 2026
+                var now = DateTime.UtcNow;
+                var startDate = now.AddYears(-1);
+                var endDate = now.AddYears(1);
 
-                    await steamService.SyncUpcomingGamesAsync(startDate, endDate);
-                }
+                // Запускаем синхронизацию (сама обновит/создаст игры и подтянет followers)
+                await steamService.SyncUpcomingGamesAsync(startDate, endDate);
 
                 _logger.LogInformation("Steam data synchronization completed successfully");
             }
