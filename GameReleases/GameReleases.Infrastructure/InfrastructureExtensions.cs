@@ -9,7 +9,11 @@ namespace GameReleases.Infrastructure;
 
 public static class InfrastructureExtensions
 {
-    // Базовый метод для регистрации репозиториев
+    /// <summary>
+    /// Базовый метод для регистрации репозиториев
+    /// </summary>
+    /// <param name="services"></param>
+    /// <returns></returns>
     private static IServiceCollection AddRepositories(this IServiceCollection services)
     {
         services.AddScoped(typeof(IRepository<>), typeof(Repository<>));
@@ -19,7 +23,13 @@ public static class InfrastructureExtensions
         return services;
     }
 
-    // Метод для регистрации специфичных репозиториев
+    /// <summary>
+    /// Метод для регистрации специфичных репозиториев
+    /// </summary>
+    /// <typeparam name="TRepository"></typeparam>
+    /// <typeparam name="TImplementation"></typeparam>
+    /// <param name="services"></param>
+    /// <returns></returns>
     private static IServiceCollection AddSpecificRepository<TRepository, TImplementation>(this IServiceCollection services)
         where TRepository : class
         where TImplementation : class, TRepository
@@ -28,7 +38,13 @@ public static class InfrastructureExtensions
         return services;
     }
 
-    // Комплексный метод для регистрации всего сразу (DbContext + репозитории)
+    /// <summary>
+    /// Комплексный метод для регистрации всего сразу (DbContext + репозитории)
+    /// </summary>
+    /// <param name="services"></param>
+    /// <param name="connectionString"></param>
+    /// <param name="dbContextOptions"></param>
+    /// <returns></returns>
     public static IServiceCollection AddDataAccess(
         this IServiceCollection services,
         string connectionString,
@@ -52,7 +68,12 @@ public static class InfrastructureExtensions
         return services;
     }
 
-    // Метод ТОЛЬКО для миграций (без сервисов)
+    /// <summary>
+    /// Метод ТОЛЬКО для миграций (без сервисов)
+    /// </summary>
+    /// <param name="services"></param>
+    /// <param name="connectionString"></param>
+    /// <returns></returns>
     public static IServiceCollection AddDbContextForMigrations(this IServiceCollection services, string connectionString)
     {
         services.AddDbContext<AppDbContext>(options =>

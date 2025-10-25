@@ -1,7 +1,7 @@
 ﻿using GameReleases.Infrastructure;
-using GameReleases.Infrastructure.Data;
 
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
 // Этот класс используется только для миграций EF Core
@@ -10,10 +10,10 @@ public static class MigrationHost
     public static IServiceProvider CreateMigrationServiceProvider()
     {
         var services = new ServiceCollection();
+        IConfiguration config = new ConfigurationBuilder().Build();
 
         // Регистрируем только DbContext без всех сервисов
-        services.AddDbContextForMigrations(
-            "Host=localhost;Port=5432;Database=game_releases;Username=postgres;Password=password");
+        services.AddDbContextForMigrations(config.GetConnectionString("DefaultConnection")!);
 
         return services.BuildServiceProvider();
     }

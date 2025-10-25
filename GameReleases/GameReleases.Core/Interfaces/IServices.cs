@@ -10,12 +10,24 @@ public interface IServices<TEntity, TId, TCreateRequest, TUpdateRequest, TRespon
     where TUpdateRequest : class
     where TResponse : class
 {
-    // Read
+    /// <summary>
+    /// Read
+    /// </summary>
+    /// <param name="id"></param>
+    /// <returns></returns>
     Task<TResponse?> GetByIdAsync(TId id);
     Task<IEnumerable<TResponse>> GetAllAsync();
     Task<IEnumerable<TResponse>> FindAsync(Expression<Func<TEntity, bool>> predicate);
 
-    // Pagination
+    /// <summary>
+    /// Pagination
+    /// </summary>
+    /// <param name="pageNumber"></param>
+    /// <param name="pageSize"></param>
+    /// <param name="predicate"></param>
+    /// <param name="orderBy"></param>
+    /// <param name="ascending"></param>
+    /// <returns></returns>
     Task<PagedResponse<TResponse>> GetPagedAsync(
         int pageNumber,
         int pageSize,
@@ -23,16 +35,33 @@ public interface IServices<TEntity, TId, TCreateRequest, TUpdateRequest, TRespon
         Expression<Func<TEntity, object>>? orderBy = null,
         bool ascending = true);
 
-    // Create
+    /// <summary>
+    /// Create
+    /// </summary>
+    /// <param name="request"></param>
+    /// <returns></returns>
     Task<TResponse> CreateAsync(TCreateRequest request);
 
-    // Update
+    /// <summary>
+    /// Update
+    /// </summary>
+    /// <param name="id"></param>
+    /// <param name="request"></param>
+    /// <returns></returns>
     Task<TResponse?> UpdateAsync(TId id, TUpdateRequest request);
 
-    // Delete
+    /// <summary>
+    /// Delete
+    /// </summary>
+    /// <param name="id"></param>
+    /// <returns></returns>
     Task<bool> DeleteAsync(TId id);
 
-    // Utility
+    /// <summary>
+    /// Utility
+    /// </summary>
+    /// <param name="predicate"></param>
+    /// <returns></returns>
     Task<bool> ExistsAsync(Expression<Func<TEntity, bool>> predicate);
     Task<int> CountAsync(Expression<Func<TEntity, bool>>? predicate = null);
 }
@@ -44,7 +73,11 @@ public interface ISteamFollowersService
 
 public interface IGameService : IServices<Game, Guid, CreateGameRequest, UpdateGameRequest, GameResponse>
 {
-    // Специфичные методы для Game
+    /// <summary>
+    /// Специфичные методы для Game
+    /// </summary>
+    /// <param name="appId"></param>
+    /// <returns></returns>
     Task<GameResponse?> GetByAppIdAsync(string appId);
     Task<IEnumerable<GameResponse>> GetByGenreAsync(string genre);
     Task<IEnumerable<GameResponse>> GetRecentGamesAsync(int days = 7);
@@ -59,6 +92,13 @@ public interface IGameService : IServices<Game, Guid, CreateGameRequest, UpdateG
 
     Task<IEnumerable<GameResponse>> GetReleasesAsync(string month, string? platform = null, string? genre = null);
     Task<CalendarResponse> GetCalendarAsync(string month);
+
+    Task<PagedResponse<GameResponse>> GetReleasesPagedAsync(
+        string month,
+        string? platform = null,
+        string? genre = null,
+        int pageNumber = 1,
+        int pageSize = 20);
 }
 
 public interface IAnalyticsService

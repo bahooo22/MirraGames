@@ -1,35 +1,28 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-  </PropertyGroup>
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+	</PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="HtmlAgilityPack" Version="1.12.4" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.21" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="9.0.10" />
-    <PackageReference Include="Microsoft.Playwright" Version="1.55.0" />
-    <PackageReference Include="System.Net.Http.Json" Version="8.0.1" />
-  </ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\GameReleases.Infrastructure\GameReleases.Infrastructure.csproj" />
-  </ItemGroup>
-	<Target Name="CopyPlaywrightDll" AfterTargets="Build">
-		<Copy SourceFiles="@(ReferenceCopyLocalPaths)"
-		      DestinationFolder="$(OutputPath)"
-		      SkipUnchangedFiles="true" />
-	</Target>
 	<ItemGroup>
-		<None Include="$(UserProfile)\.nuget\packages\microsoft.playwright\1.55.0\lib\netstandard2.0\Microsoft.Playwright.dll"
-		      Pack="false"
-		      CopyToOutputDirectory="PreserveNewest" />
+		<PackageReference Include="HtmlAgilityPack" Version="1.12.4" />
+		<PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.21" />
+		<PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="8.0.21" />
+		<PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="9.0.10" />
+		<PackageReference Include="Microsoft.Playwright" Version="1.55.0" />
+		<PackageReference Include="System.Net.Http.Json" Version="8.0.1" />
 	</ItemGroup>
-  <ItemGroup>
-    <Folder Include="Models\" />
-    <Folder Include="Services\" />
-    <Folder Include="DTO\" />
-  </ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\GameReleases.Infrastructure\GameReleases.Infrastructure.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Folder Include="Models\" />
+		<Folder Include="Services\" />
+		<Folder Include="DTO\" />
+	</ItemGroup>
 
 </Project>

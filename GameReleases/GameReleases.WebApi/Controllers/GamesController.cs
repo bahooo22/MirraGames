@@ -28,16 +28,30 @@ public class GamesController : ControllerBase
         [FromQuery] int pageSize = 20,
         [FromQuery] string? search = null,
         [FromQuery] string? genre = null,
-        [FromQuery] string? platform = null)
+        [FromQuery] string? platform = null,
+        [FromQuery] string? month = null)
     {
         try
         {
-            var result = await _gameService.GetPagedWithFiltersAsync(page, pageSize, search, genre, platform);
+            PagedResponse<GameResponse> result;
+
+            if (!string.IsNullOrEmpty(month))
+            {
+                // Режим: релизы месяца С ПАГИНАЦИЕЙ
+                // Нужно создать метод в сервисе который возвращает PagedResponse для релизов
+                result = await _gameService.GetReleasesPagedAsync(month, platform, genre, page, pageSize);
+            }
+            else
+            {
+                // Режим: все игры С ПАГИНАЦИЕЙ
+                result = await _gameService.GetPagedWithFiltersAsync(page, pageSize, search, genre, platform);
+            }
+
             return Ok(result);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error getting paged games");
+            _logger.LogError(ex, "Error getting games");
             return StatusCode(500, "An error occurred while retrieving games");
         }
     }
@@ -189,20 +203,5 @@ public class GamesController : ControllerBase
         }
     }
 
-    /// <summary>
-    /// Псевдоним для соответствия ТЗ: GET /api/v1/games?month=yyyy-MM
-    /// </summary>
-    /// <param name="month"></param>
-    /// <param name="platform"></param>
-    /// <param name="genre"></param>
-    /// <returns></returns>
-    [HttpGet]
-    [AllowAnonymous]
-    public async Task<ActionResult<IEnumerable<GameResponse>>> GetReleasesAlias(
-        [FromQuery] string month,
-        [FromQuery] string? platform = null,
-        [FromQuery] string? genre = null)
-    {
-        return await GetReleases(month, platform, genre);
-    }
+
 }

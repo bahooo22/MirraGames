@@ -1,30 +1,39 @@
-**/.classpath
-**/.dockerignore
-**/.env
+# Системные файлы
 **/.git
-**/.gitignore
-**/.project
-**/.settings
-**/.toolstarget
 **/.vs
 **/.vscode
-**/*.*proj.user
+
+# Файлы сборки
+**/bin/
+**/obj/
+**/TestResults/
+
+# Логи и кэши
+**/logs/
+**/node_modules/
+**/.npm/
+
+# Конфиги IDE
+**/*.user
+**/*.suo
+**/*.psess
+**/.project
+**/.classpath
+**/.settings/
+
+# Docker файлы (опционально - если они не нужны в контейнере)
+# **/Dockerfile*
+# **/docker-compose*
+# **/.env
+
+# Документация
+**/*.md
+**/LICENSE
+
+# Временные файлы
 **/*.dbmdl
 **/*.jfm
 **/azds.yaml
-**/bin
-**/charts
-**/docker-compose*
-**/Dockerfile*
-**/node_modules
-**/npm-debug.log
-**/obj
 **/secrets.dev.yaml
 **/values.dev.yaml
-LICENSE
-README.md
-!**/.gitignore
-!.git/HEAD
-!.git/config
-!.git/packed-refs
-!.git/refs/heads/**
+**/charts/

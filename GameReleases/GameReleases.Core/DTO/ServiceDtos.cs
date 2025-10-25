@@ -67,7 +67,7 @@ public class UpdateGameRequest
 
 public class GameResponse
 {
-    public Guid Id { get; set; }
+    public Guid Id { get; init; }
     public string AppId { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public DateTime? ReleaseDate { get; set; }
@@ -102,7 +102,7 @@ public class GameResponse
 
 public class CalendarDayResponse
 {
-    public DateTime Date { get; set; }
+    public DateTime Date { get; init; }
     public int Count { get; set; }
 }
 
@@ -115,7 +115,7 @@ public class CalendarResponse
 public class GenreStatsResponse
 {
     public string Genre { get; set; } = string.Empty;
-    public int Games { get; set; }
+    public int Games { get; init; }
     public double AvgFollowers { get; set; }
 }
 
@@ -131,19 +131,19 @@ public class GenreDynamicsResponse
 
 public class SteamSearchResult
 {
-    public string AppId { get; set; } = string.Empty;
-    public DateTime? ReleaseDate { get; set; }
+    public string AppId { get; init; } = string.Empty;
+    public DateTime? ReleaseDate { get; init; }
 }
 
 public class GenreDynamicsSeriesResponse
 {
     public string Genre { get; set; } = string.Empty;
-    public List<int> Counts { get; set; } = new();
-    public List<int> AvgFollowers { get; set; } = new();
+    public List<int> Counts { get; set; } = [];
+    public List<int> AvgFollowers { get; set; } = [];
 }
 
 public class GenreDynamicsResultResponse
 {
-    public List<string> Months { get; set; } = new();
-    public List<GenreDynamicsSeriesResponse> Series { get; set; } = new();
+    public List<string> Months { get; set; } = [];
+    public List<GenreDynamicsSeriesResponse> Series { get; set; } = [];
 }

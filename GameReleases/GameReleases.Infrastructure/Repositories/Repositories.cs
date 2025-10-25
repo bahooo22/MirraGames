@@ -13,18 +13,23 @@ using Microsoft.Extensions.Configuration;
 
 namespace GameReleases.Infrastructure.Repositories;
 
-public class Repository<TEntity> : IRepository<TEntity> where TEntity : class
+public class Repository<TEntity> : IRepository<TEntity>
+    where TEntity : class
 {
     protected readonly DbContext _context;
     protected readonly DbSet<TEntity> _dbSet;
 
-    public Repository(AppDbContext context)
+    public Repository(DbContext context)
     {
         _context = context;
         _dbSet = context.Set<TEntity>();
     }
 
-    // Read
+    /// <summary>
+    /// Read
+    /// </summary>
+    /// <param name="id"></param>
+    /// <returns></returns>
     public virtual async Task<TEntity?> GetByIdAsync(Guid id)
     {
         return await _dbSet.FindAsync(id);
@@ -66,7 +71,15 @@ public class Repository<TEntity> : IRepository<TEntity> where TEntity : class
         return await query.Where(predicate).ToListAsync();
     }
 
-    // Pagination
+    /// <summary>
+    /// Pagination
+    /// </summary>
+    /// <param name="pageNumber"></param>
+    /// <param name="pageSize"></param>
+    /// <param name="predicate"></param>
+    /// <param name="orderBy"></param>
+    /// <param name="ascending"></param>
+    /// <returns></returns>
     public virtual async Task<(IEnumerable<TEntity> Items, int TotalCount)> GetPagedAsync(
         int pageNumber,
         int pageSize,
@@ -100,7 +113,11 @@ public class Repository<TEntity> : IRepository<TEntity> where TEntity : class
         return (items, totalCount);
     }
 
-    // Create
+    /// <summary>
+    /// Create
+    /// </summary>
+    /// <param name="entity"></param>
+    /// <returns></returns>
     public virtual async Task<TEntity> AddAsync(TEntity entity)
     {
         var entry = await _dbSet.AddAsync(entity);
@@ -114,7 +131,11 @@ public class Repository<TEntity> : IRepository<TEntity> where TEntity : class
         return entityList;
     }
 
-    // Update
+    /// <summary>
+    /// Update
+    /// </summary>
+    /// <param name="entity"></param>
+    /// <returns></returns>
     public virtual async Task<TEntity> UpdateAsync(TEntity entity)
     {
         _dbSet.Update(entity);
@@ -127,7 +148,10 @@ public class Repository<TEntity> : IRepository<TEntity> where TEntity : class
         _dbSet.UpdateRange(entities);
     }
 
-    // Delete
+    /// <summary>
+    /// Delete
+    /// </summary>
+    /// <param name="entity"></param>
     public virtual void Remove(TEntity entity)
     {
         _dbSet.Remove(entity);
@@ -138,7 +162,11 @@ public class Repository<TEntity> : IRepository<TEntity> where TEntity : class
         _dbSet.RemoveRange(entities);
     }
 
-    // Utility
+    /// <summary>
+    /// Utility
+    /// </summary>
+    /// <param name="predicate"></param>
+    /// <returns></returns>
     public virtual async Task<bool> ExistsAsync(Expression<Func<TEntity, bool>> predicate)
     {
         return await _dbSet.AnyAsync(predicate);
@@ -163,7 +191,7 @@ public class ClickHouseAnalyticsRepository : IAnalyticsRepository
 
     public ClickHouseAnalyticsRepository(IConfiguration configuration)
     {
-        _connectionString = configuration.GetConnectionString("ClickHouse")
+        _connectionString = configuration.GetConnectionString("ClickHouseConnection")
                             ?? throw new InvalidOperationException("ClickHouse connection string not configured");
     }
 

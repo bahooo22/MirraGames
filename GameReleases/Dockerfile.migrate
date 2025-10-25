@@ -1,0 +1,40 @@
+# Stage 1 — build tools + dotnet-ef
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+
+# Устанавливаем netcat и EF CLI (кэшируется)
+RUN apt-get update -qq \
+ && apt-get install -y --no-install-recommends netcat-openbsd \
+ && dotnet tool install --global dotnet-ef \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="$PATH:/root/.dotnet/tools"
+
+# Копируем решения и проекты для восстановления зависимостей
+COPY *.sln ./
+COPY GameReleases.WebApi/GameReleases.WebApi.csproj GameReleases.WebApi/
+COPY GameReleases.Core/GameReleases.Core.csproj GameReleases.Core/
+COPY GameReleases.Infrastructure/GameReleases.Infrastructure.csproj GameReleases.Infrastructure/
+RUN dotnet restore
+
+# Копируем остальной код
+COPY . .
+
+# Stage 2 — минимальный runtime для миграций
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS runtime
+WORKDIR /app
+
+# Копируем только то, что нужно: dotnet-ef и проект
+COPY --from=build /root/.dotnet /root/.dotnet
+COPY --from=build /src /app
+
+# Добавляем netcat (для ожидания postgres)
+RUN apt-get update -qq && apt-get install -y --no-install-recommends netcat-openbsd && rm -rf /var/lib/apt/lists/*
+
+# Добавляем скрипт миграций
+COPY migrate.sh /usr/local/bin/migrate.sh
+RUN chmod +x /usr/local/bin/migrate.sh
+
+ENV PATH="$PATH:/root/.dotnet/tools"
+
+ENTRYPOINT ["/usr/local/bin/migrate.sh"]

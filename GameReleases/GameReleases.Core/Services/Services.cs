@@ -29,6 +29,7 @@ public abstract class Services<TEntity, TId, TCreateRequest, TUpdateRequest, TRe
     where TCreateRequest : class
     where TUpdateRequest : class
     where TResponse : class
+    where TId : notnull
 {
     protected readonly IRepository<TEntity> _repository;
     protected readonly ILogger _logger;
@@ -39,19 +40,31 @@ public abstract class Services<TEntity, TId, TCreateRequest, TUpdateRequest, TRe
         _logger = logger;
     }
 
-    // Abstract methods for mapping
+    /// <summary>
+    /// Abstract methods for mapping
+    /// </summary>
+    /// <param name="request"></param>
+    /// <returns></returns>
     protected abstract TEntity MapToEntity(TCreateRequest request);
     protected abstract TResponse MapToResponse(TEntity entity);
     protected abstract void UpdateEntity(TEntity entity, TUpdateRequest request);
 
-    // Read
+    /// <summary>
+    /// Read
+    /// </summary>
+    /// <param name="id"></param>
+    /// <returns></returns>
     public virtual async Task<TResponse?> GetByIdAsync(TId id)
     {
         try
         {
-            // TODO: доделать проверки на null
-            var entity = await _repository.GetByIdAsync((Guid)(object)id);
-            return entity != null ? MapToResponse(entity) : null;
+            if (id is Guid guidId)
+            {
+                var entity = await _repository.GetByIdAsync(guidId);
+                return entity != null ? MapToResponse(entity) : null;
+            }
+
+            throw new InvalidOperationException($"ID must be of type Guid, but got {id?.GetType().Name}");
         }
         catch (Exception ex)
         {
@@ -88,7 +101,15 @@ public abstract class Services<TEntity, TId, TCreateRequest, TUpdateRequest, TRe
         }
     }
 
-    // Pagination
+    /// <summary>
+    /// Pagination
+    /// </summary>
+    /// <param name="pageNumber"></param>
+    /// <param name="pageSize"></param>
+    /// <param name="predicate"></param>
+    /// <param name="orderBy"></param>
+    /// <param name="ascending"></param>
+    /// <returns></returns>
     public virtual async Task<PagedResponse<TResponse>> GetPagedAsync(
         int pageNumber,
         int pageSize,
@@ -116,7 +137,11 @@ public abstract class Services<TEntity, TId, TCreateRequest, TUpdateRequest, TRe
         }
     }
 
-    // Create
+    /// <summary>
+    /// Create
+    /// </summary>
+    /// <param name="request"></param>
+    /// <returns></returns>
     public virtual async Task<TResponse> CreateAsync(TCreateRequest request)
     {
         try
@@ -134,24 +159,32 @@ public abstract class Services<TEntity, TId, TCreateRequest, TUpdateRequest, TRe
         }
     }
 
-    // Update
+    /// <summary>
+    /// Update
+    /// </summary>
+    /// <param name="id"></param>
+    /// <param name="request"></param>
+    /// <returns></returns>
     public virtual async Task<TResponse?> UpdateAsync(TId id, TUpdateRequest request)
     {
         try
         {
-            // TODO: доделать проверки на null
-
-            var entity = await _repository.GetByIdAsync((Guid)(object)id);
-            if (entity == null)
+            if (id is Guid guidId)
             {
-                return null;
+                var entity = await _repository.GetByIdAsync(guidId);
+                if (entity == null)
+                {
+                    return null;
+                }
+
+                UpdateEntity(entity, request);
+                await _repository.UpdateAsync(entity);
+                await _repository.SaveChangesAsync();
+
+                return MapToResponse(entity);
             }
 
-            UpdateEntity(entity, request);
-            await _repository.UpdateAsync(entity);
-            await _repository.SaveChangesAsync();
-
-            return MapToResponse(entity);
+            throw new InvalidOperationException($"ID must be of type Guid, but got {id?.GetType().Name}");
         }
         catch (Exception ex)
         {
@@ -160,23 +193,30 @@ public abstract class Services<TEntity, TId, TCreateRequest, TUpdateRequest, TRe
         }
     }
 
-    // Delete
+    /// <summary>
+    /// Delete
+    /// </summary>
+    /// <param name="id"></param>
+    /// <returns></returns>
     public virtual async Task<bool> DeleteAsync(TId id)
     {
         try
         {
-            // TODO: доделать проверки на null
-
-            var entity = await _repository.GetByIdAsync((Guid)(object)id);
-            if (entity == null)
+            if (id is Guid guidId)
             {
-                return false;
+                var entity = await _repository.GetByIdAsync(guidId);
+                if (entity == null)
+                {
+                    return false;
+                }
+
+                _repository.Remove(entity);
+                await _repository.SaveChangesAsync();
+
+                return true;
             }
 
-            _repository.Remove(entity);
-            await _repository.SaveChangesAsync();
-
-            return true;
+            throw new InvalidOperationException($"ID must be of type Guid, but got {id?.GetType().Name}");
         }
         catch (Exception ex)
         {
@@ -184,8 +224,11 @@ public abstract class Services<TEntity, TId, TCreateRequest, TUpdateRequest, TRe
             throw;
         }
     }
-
-    // Utility
+    /// <summary>
+    /// Utility
+    /// </summary>
+    /// <param name="predicate"></param>
+    /// <returns></returns>
     public virtual async Task<bool> ExistsAsync(Expression<Func<TEntity, bool>> predicate)
     {
         try
@@ -332,13 +375,16 @@ public class SteamFollowersService : ISteamFollowersService, IAsyncDisposable, I
 
 public class GameService(
     IAnalyticsRepository analyticsRepository,
-    ISteamService steamService,
     IGameRepository gameRepository,
     ILogger<GameService> logger)
     : Services<Game, Guid, CreateGameRequest, UpdateGameRequest, GameResponse>(gameRepository, logger), IGameService
 {
 
-    // Реализация абстрактных методов маппинга
+    /// <summary>
+    /// Реализация абстрактных методов маппинга
+    /// </summary>
+    /// <param name="request"></param>
+    /// <returns></returns>
     protected override Game MapToEntity(CreateGameRequest request)
     {
         return new Game
@@ -388,7 +434,7 @@ public class GameService(
         entity.CollectedAt = DateTime.UtcNow;
     }
 
-    public override async Task<GameResponse> UpdateAsync(Guid id, UpdateGameRequest request)
+    public override async Task<GameResponse?> UpdateAsync(Guid id, UpdateGameRequest request)
     {
         var entity = await gameRepository.GetByIdAsync(id);
         if (entity == null)
@@ -452,7 +498,12 @@ public class GameService(
     }
 
 
-    // Переопределение CreateAsync для дополнительной валидации
+    /// <summary>
+    /// Переопределение CreateAsync для дополнительной валидации
+    /// </summary>
+    /// <param name="request"></param>
+    /// <returns></returns>
+    /// <exception cref="InvalidOperationException"></exception>
     public override async Task<GameResponse> CreateAsync(CreateGameRequest request)
     {
         var existingGame = await gameRepository.GetByAppIdAsync(request.AppId);
@@ -468,7 +519,11 @@ public class GameService(
         return MapToResponse(entity);
     }
 
-    // Специфичные методы для Game
+    /// <summary>
+    /// Специфичные методы для Game
+    /// </summary>
+    /// <param name="appId"></param>
+    /// <returns></returns>
     public async Task<GameResponse?> GetByAppIdAsync(string appId)
     {
         try
@@ -523,6 +578,26 @@ public class GameService(
             _logger.LogError(ex, "Error getting {Count} popular games", count);
             throw;
         }
+    }
+
+    public async Task<PagedResponse<GameResponse>> GetReleasesPagedAsync(
+        string month,
+        string? platform = null,
+        string? genre = null,
+        int pageNumber = 1,
+        int pageSize = 20)
+    {
+        // Логика получения релизов по месяцу + пагинация
+        var games = await GetReleasesAsync(month, platform, genre);
+        var pagedGames = games.Skip((pageNumber - 1) * pageSize).Take(pageSize);
+
+        return new PagedResponse<GameResponse>
+        {
+            Items = pagedGames,
+            PageNumber = pageNumber,
+            PageSize = pageSize,
+            TotalCount = games.Count()
+        };
     }
 
     public async Task<PagedResponse<GameResponse>> GetPagedWithFiltersAsync(
@@ -664,9 +739,9 @@ public class SteamService : ISteamService
 
     }
 
-    // -------------------------------------------------------------
-    // Получение количества подписчиков (followers) через Steam Community Search
-    // -------------------------------------------------------------
+    /// <summary>
+    /// Получение количества подписчиков (followers) через Steam Community Search
+    /// </summary>
     private static readonly SemaphoreSlim _semaphore = new(3, 3); // максимум 3 одновременных запроса
     private readonly Dictionary<string, (DateTime fetched, int followers)> _cache = new(); // кеш на 6ч
 
@@ -776,9 +851,9 @@ public class SteamService : ISteamService
         }
     }
 
-    // -------------------------------------------------------------
-    // Поиск upcoming игр через Steam Store Search
-    // -------------------------------------------------------------
+    /// <summary>
+    /// Поиск upcoming игр через Steam Store Search
+    /// </summary>
     private const string SteamSearchUrl =
         "https://store.steampowered.com/search/?sort_by=Released_DESC&category1=998&ndl=1&page={0}";
 
@@ -871,9 +946,12 @@ public class SteamService : ISteamService
         return null;
     }
 
-    // -------------------------------------------------------------
-    // Синхронизация игр
-    // -------------------------------------------------------------
+    /// <summary>
+    /// Синхронизация игр
+    /// </summary>
+    /// <param name="startDate"></param>
+    /// <param name="endDate"></param>
+    /// <returns></returns>
     public async Task SyncUpcomingGamesAsync(DateTime startDate, DateTime endDate)
     {
         var upcomingList = await GetUpcomingAppIdsAsync(startDate, endDate);
@@ -933,9 +1011,12 @@ public class SteamService : ISteamService
         _logger.LogInformation("Saved all game updates to the database");
     }
 
-    // -------------------------------------------------------------
-    // Детали игры
-    // -------------------------------------------------------------
+    /// <summary>
+    /// Детали игры
+    /// </summary>
+    /// <param name="appId"></param>
+    /// <param name="releaseDate"></param>
+    /// <returns></returns>
     private async Task<Game?> GetGameDetailsAsync(string appId, DateTime? releaseDate)
     {
         var detailsUrl = $"https://store.steampowered.com/api/appdetails?appids={appId}";
@@ -1182,16 +1263,16 @@ public class SteamSyncService : ISteamSyncService
 
 public class SteamBackgroundService : BackgroundService
 {
-    readonly ISteamSyncService _syncService;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<SteamBackgroundService> _logger;
     private readonly TimeSpan _syncInterval = TimeSpan.FromHours(6);
 
     public SteamBackgroundService(
-        ISteamSyncService syncService,
+        IServiceScopeFactory scopeFactory,
         ILogger<SteamBackgroundService> logger)
     {
         _logger = logger;
-        _syncService = syncService;
+        _scopeFactory = scopeFactory;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -1200,7 +1281,10 @@ public class SteamBackgroundService : BackgroundService
         {
             try
             {
-                await _syncService.SyncAsync(stoppingToken);
+                using var scope = _scopeFactory.CreateScope();
+                var syncService = scope.ServiceProvider.GetRequiredService<ISteamSyncService>();
+
+                await syncService.SyncAsync(stoppingToken);
             }
             catch (Exception ex)
             {
@@ -1212,43 +1296,45 @@ public class SteamBackgroundService : BackgroundService
     }
 }
 
-// Вспомогательные классы для десериализации Steam API
+/// <summary>
+/// Вспомогательные классы для десериализации Steam API
+/// </summary>
 public class AppListResponse
 {
-    public AppList applist { get; set; }
+    public required AppList applist { get; set; }
 }
 
 public class AppList
 {
-    public List<App> apps { get; set; }
+    public required List<App> apps { get; set; }
 }
 
 public class App
 {
     public int Appid { get; set; }
-    public string name { get; set; }
+    public required string name { get; set; }
 }
 
 public class AppDetails
 {
     public bool success { get; set; }
-    public AppData data { get; set; }
+    public required AppData data { get; set; }
 }
 
 public class AppData
 {
-    public string name { get; set; }
-    public ReleaseDate release_date { get; set; }
-    public string short_description { get; set; }
-    public string header_image { get; set; }
-    public Platforms platforms { get; set; }
-    public List<Genre> genres { get; set; }
+    public required string name { get; set; }
+    public required ReleaseDate release_date { get; set; }
+    public required string short_description { get; set; }
+    public required string header_image { get; set; }
+    public required Platforms platforms { get; set; }
+    public required List<Genre> genres { get; set; }
 }
 
 public class ReleaseDate
 {
     public bool coming_soon { get; set; }
-    public string date { get; set; }
+    public required string date { get; set; }
 }
 
 public class Platforms
@@ -1260,6 +1346,5 @@ public class Platforms
 
 public class Genre
 {
-    public string description { get; set; }
+    public required string description { get; set; }
 }
-
