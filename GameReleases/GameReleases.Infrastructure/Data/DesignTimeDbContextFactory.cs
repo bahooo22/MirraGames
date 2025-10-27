@@ -2,36 +2,46 @@
 using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.Extensions.Configuration;
 
-using System.IO;
-
 namespace GameReleases.Infrastructure.Data;
 
 public class DesignTimeDbContextFactory : IDesignTimeDbContextFactory<AppDbContext>
 {
     public AppDbContext CreateDbContext(string[] args)
     {
-        // Загружаем конфигурацию из:
-        // 1. appsettings.json
-        // 2. appsettings.Development.json (если есть)
-        // 3. переменных окружения (ENV)
+        // 1️ Пытаемся взять из аргумента --connection
+        string? cliConnection = null;
+        if (args != null && args.Length > 0)
+        {
+            var index = Array.IndexOf(args, "--connection");
+            if (index >= 0 && index < args.Length - 1)
+                cliConnection = args[index + 1];
+        }
+
+        // 2️ Из ENV переменной (docker-compose передаёт её)
+        var envConnection = Environment.GetEnvironmentVariable("ConnectionStrings__DefaultConnection");
+
+        // 3️ Из конфигов
         var config = new ConfigurationBuilder()
             .SetBasePath(Directory.GetCurrentDirectory())
             .AddJsonFile("appsettings.json", optional: true)
             .AddJsonFile("appsettings.Development.json", optional: true)
+            .AddJsonFile("appsettings.Production.json", optional: true)
             .AddEnvironmentVariables()
             .Build();
 
-        // Читаем строку подключения
-        var connectionString = config.GetConnectionString("DefaultConnection")
-            ?? config["ConnectionStrings__DefaultConnection"];
+        var jsonConnection = config.GetConnectionString("DefaultConnection");
+
+        // 4️ Выбираем приоритет — CLI → ENV → JSON
+        var connectionString = cliConnection ?? envConnection ?? jsonConnection;
 
         if (string.IsNullOrWhiteSpace(connectionString))
-            throw new InvalidOperationException("Connection string 'DefaultConnection' not found.");
+            throw new InvalidOperationException("No connection string found for 'DefaultConnection'.");
 
         var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();
         optionsBuilder.UseNpgsql(connectionString,
-            x => x.MigrationsAssembly("GameReleases.Infrastructure"));
+            opt => opt.MigrationsAssembly(typeof(DesignTimeDbContextFactory).Assembly.FullName));
 
+        Console.WriteLine($"[DesignTimeDbContextFactory] Using connection: {connectionString}");
         return new AppDbContext(optionsBuilder.Options);
     }
 }

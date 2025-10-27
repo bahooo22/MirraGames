@@ -1,81 +1,111 @@
 # syntax=docker/dockerfile:1.5
 
-# --- Stage 0: Playwright runtime с браузерами ---
+##########################################
+# --- Stage 0: Playwright base (бразуеры)
+##########################################
 FROM mcr.microsoft.com/playwright/dotnet:v1.55.0-jammy AS playwright
 
-# --- Stage 1: Build environment ---
+
+##########################################
+# --- Stage 1: Build environment
+##########################################
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
 # Кэш NuGet пакетов
-RUN --mount=type=cache,target=/root/.nuget/packages \
-    dotnet nuget list source
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages dotnet nuget list source
 
 COPY *.sln ./
+COPY GameReleases.Core/*.csproj GameReleases.Core/
+COPY GameReleases.Infrastructure/*.csproj GameReleases.Infrastructure/
+COPY GameReleases.WebApi/*.csproj GameReleases.WebApi/
+RUN dotnet restore GameReleases.sln
 
-# Копируем только csproj-файлы для restore-кеша
-COPY GameReleases.Core/GameReleases.Core.csproj GameReleases.Core/
-COPY GameReleases.Infrastructure/GameReleases.Infrastructure.csproj GameReleases.Infrastructure/
-COPY GameReleases.WebApi/GameReleases.WebApi.csproj GameReleases.WebApi/
-
-# Восстанавливаем зависимости
-RUN --mount=type=cache,target=/root/.nuget/packages \
-    dotnet restore GameReleases.sln
-
-# Копируем остальной код (с link для ускорения)
-COPY --link . .
-
-# Устанавливаем Playwright CLI (быстро)
+# Устанавливаем Playwright CLI
 RUN dotnet tool install --global Microsoft.Playwright.CLI
-ENV PATH="$PATH:/root/.dotnet/tools"
+ENV PATH="/root/.dotnet/tools:${PATH}"
 
+# Копируем весь исходный код
+COPY . .
 WORKDIR /src/GameReleases.WebApi
-RUN dotnet build -c Release -o /app/build
+RUN dotnet build -c Release -o /app/build --no-restore
 
-# --- Stage 2: Publish ---
+
+##########################################
+# --- Stage 2: Publish
+##########################################
 FROM build AS publish
 RUN dotnet publish -c Release -o /app/publish /p:UseAppHost=false
 
-## --- Stage 3: Runtime ---
-#FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
-#WORKDIR /app
-#EXPOSE 8080
-#EXPOSE 443
-#
-## Копируем приложение
-#COPY --from=publish /app/publish .
-#
-## Копируем браузеры из Playwright образа
-#COPY --from=playwright /ms-playwright /ms-playwright
-#
-## Устанавливаем зависимости для Chromium/WebKit/Firefox
-#RUN apt-get update && \
-#    apt-get install -y --no-install-recommends \
-#      libglib2.0-0 libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
-#      libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
-#      libxrandr2 libgbm1 libasound2 libxshmfence1 libx11-6 \
-#      libxext6 libxfixes3 libexpat1 libdbus-1-3 libatspi2.0-0 \
-#      libxcb1 libpangocairo-1.0-0 libpango-1.0-0 libgtk-3-0 \
-#      fonts-liberation libxss1 libxtst6 && \
-#    rm -rf /var/lib/apt/lists/*
-#
-## Симлинк для Playwright
-#RUN mkdir -p /root/.cache && ln -sf /ms-playwright /root/.cache/ms-playwright
-#
-#ENTRYPOINT ["dotnet", "GameReleases.WebApi.dll"]
-# --- Stage 3: Runtime ---
-FROM mcr.microsoft.com/playwright/dotnet:v1.55.0-jammy AS final
+##########################################
+# --- Stage 3: Runtime (API)
+##########################################
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS api
 WORKDIR /app
 EXPOSE 8080
 EXPOSE 443
 
-# Копируем приложение
+# Копируем опубликованное приложение
 COPY --from=publish /app/publish .
 
-# Копируем браузеры из Playwright образа
+# Копируем ВСЮ папку ms-playwright из образа Playwright
 COPY --from=playwright /ms-playwright /ms-playwright
 
-# Симлинк для Playwright
-RUN mkdir -p /root/.cache && ln -sf /ms-playwright /root/.cache/ms-playwright
+# Копируем системные зависимости
+COPY --from=playwright /usr/lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu
+COPY --from=playwright /lib/x86_64-linux-gnu /lib/x86_64-linux-gnu
+COPY --from=playwright /usr/share/fonts /usr/share/fonts
+COPY --from=playwright /etc/fonts /etc/fonts
+COPY --from=playwright /etc/ssl /etc/ssl
 
-ENTRYPOINT ["dotnet", "GameReleases.WebApi.dll"]
+# Создаем правильные симлинки для Playwright
+RUN mkdir -p /root/.cache && \
+    # Основной симлинк
+    ln -sf /ms-playwright /root/.cache/ms-playwright
+
+# Проверяем установку
+RUN echo "=== Browser check ===" && \
+    echo "Checking actual browser path..." && \
+    ls -la /ms-playwright/chromium_headless_shell-1187/chrome-linux/headless_shell && \
+    echo "Checking symlink..." && \
+    ls -la /root/.cache/ms-playwright/chromium_headless_shell-1187/chrome-linux/headless_shell && \
+    echo "✅ Browser is properly installed"
+
+# Копируем dotnet tools из build stage
+COPY --from=build /root/.dotnet /root/.dotnet
+ENV PATH="/root/.dotnet/tools:${PATH}"
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+
+##########################################
+# --- Stage 4: Migrations (no browsers)
+##########################################
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS migrate
+WORKDIR /app
+
+# Копируем опубликованные артефакты
+COPY --from=publish /app/publish ./bin_release
+
+# Копируем ТОЛЬКО исходники (без bin/obj папок)
+COPY *.sln ./
+COPY GameReleases.Core/ ./GameReleases.Core/
+COPY GameReleases.Infrastructure/ ./GameReleases.Infrastructure/
+COPY GameReleases.WebApi/ ./GameReleases.WebApi/
+
+# Восстанавливаем пакеты
+RUN dotnet restore GameReleases.sln
+
+# dotnet-ef CLI
+RUN dotnet tool install --global dotnet-ef
+ENV PATH="/root/.dotnet/tools:${PATH}"
+
+# Устанавливаем netcat и psql
+RUN apt-get update -qq && apt-get install -y --no-install-recommends netcat-openbsd postgresql-client && rm -rf /var/lib/apt/lists/*
+
+# Миграционный скрипт
+COPY migrate.sh /usr/local/bin/migrate.sh
+RUN chmod +x /usr/local/bin/migrate.sh
+
+ENTRYPOINT ["/usr/local/bin/migrate.sh"]

@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16
+    container_name: postgres
     environment:
       POSTGRES_DB: game_releases
       POSTGRES_USER: postgres
@@ -18,7 +19,8 @@ services:
       retries: 20
 
   clickhouse:
-    image: clickhouse/clickhouse-server:latest
+    image: clickhouse/clickhouse-server:24.5
+    container_name: clickhouse
     environment:
       CLICKHOUSE_DB: game_analytics
       CLICKHOUSE_USER: default
@@ -38,10 +40,12 @@ services:
   migrate:
     build:
       context: .
-      dockerfile: Dockerfile.migrate
+      dockerfile: Dockerfile
+      target: migrate
+    container_name: migrate
     environment:
-      - ConnectionStrings__DefaultConnection=Host=postgres;Port=5432;Database=game_releases;Username=postgres;Password=1234
       - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__DefaultConnection=Host=postgres;Port=5432;Database=game_releases;Username=postgres;Password=1234
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,30 +56,61 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: api
+    container_name: game-releases-api
     ports:
-      - "8080:80"
+      - "8080:8080"
     environment:
-      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:8080
       - ConnectionStrings__DefaultConnection=Host=postgres;Port=5432;Database=game_releases;Username=postgres;Password=1234
       - ConnectionStrings__ClickHouseConnection=Host=clickhouse;Port=8123;Database=game_analytics;Username=default;Password=
       - JwtSettings__Secret=your-super-secret-key-at-least-32-characters-long
       - JwtSettings__Issuer=GameReleasesAPI
       - JwtSettings__Audience=GameReleasesClient
       - JwtSettings__ExpirationMinutes=60
-    volumes:
-      - playwright-cache:/root/.cache/playwright
+      - ENABLE_SWAGGER=true
     depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_started
       migrate:
         condition: service_completed_successfully
+    networks:
+      - game-network
+    profiles: ["prod"]
+
+  # Dev режим
+  game-releases-api-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: build
+    container_name: game-releases-api-dev
+    ports:
+      - "8080:8080"
+    command: dotnet watch --project /src/GameReleases.WebApi/GameReleases.WebApi.csproj run
+    volumes:
+      - .:/src
+      - ~/.nuget/packages:/root/.nuget/packages
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=game_releases;Username=postgres;Password=1234
+      ConnectionStrings__ClickHouseConnection: Host=clickhouse;Port=8123;Database=game_analytics;Username=default;Password=
+    depends_on:
+      postgres:
+        condition: service_healthy
       clickhouse:
         condition: service_started
     networks:
       - game-network
+    profiles: ["dev"]
 
 volumes:
   postgres_data:
   clickhouse_data:
-  playwright-cache:
 
 networks:
   game-network:

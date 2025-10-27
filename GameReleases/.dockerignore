@@ -37,3 +37,10 @@
 **/secrets.dev.yaml
 **/values.dev.yaml
 **/charts/
+
+.buildx-cache/
+**/playwright-report/
+**/test-results/
+**/.playwright/
+**/.nuget/
+**/.idea/
