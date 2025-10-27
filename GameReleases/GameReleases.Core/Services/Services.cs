@@ -926,7 +926,9 @@ public class SteamService : ISteamService
         int page = 0;
         bool hasMore = true;
 
-        while (hasMore && page < 3)
+        // TODO: вынести в конфиг или параметры "Лимит страниц для обхода, чтобы не парсить слишком много"
+        var pageLimit = 10;
+        while (hasMore && page < pageLimit)
         {
             page++;
             var url = string.Format(SteamSearchUrl, page);
