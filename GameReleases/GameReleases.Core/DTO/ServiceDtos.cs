@@ -1,5 +1,7 @@
 ﻿using System.ComponentModel.DataAnnotations;
 
+using GameReleases.Infrastructure.Entities;
+
 namespace GameReleases.Core.DTO;
 
 /// <summary>
@@ -8,8 +10,8 @@ namespace GameReleases.Core.DTO;
 
 public class CreateGameRequest
 {
-    [Required, StringLength(50)]
-    public string AppId { get; set; } = string.Empty;
+    [Required]
+    public ulong AppId { get; set; }
 
     [Required, StringLength(200)]
     public string Name { get; set; } = string.Empty;
@@ -19,8 +21,8 @@ public class CreateGameRequest
     [MinLength(1, ErrorMessage = "At least one genre is required")]
     public ICollection<string> Genres { get; set; } = [];
 
-    [Range(0, int.MaxValue, ErrorMessage = "Followers must be non-negative")]
-    public int Followers { get; set; }
+    [Range(0, ulong.MaxValue, ErrorMessage = "Followers must be non-negative")]
+    public ulong Followers { get; set; }
 
     [Required, Url]
     public string StoreUrl { get; set; } = string.Empty;
@@ -45,8 +47,8 @@ public class UpdateGameRequest
     [MinLength(1)]
     public ICollection<string> Genres { get; set; } = [];
 
-    [Range(0, int.MaxValue)]
-    public int Followers { get; set; }
+    [Range(0, ulong.MaxValue)]
+    public ulong Followers { get; set; }
 
     [Required, Url]
     public string StoreUrl { get; set; } = string.Empty;
@@ -68,18 +70,18 @@ public class UpdateGameRequest
 public class GameResponse
 {
     public Guid Id { get; init; }
-    public string AppId { get; set; } = string.Empty;
+    public ulong AppId { get; set; }
     public string Name { get; set; } = string.Empty;
     public DateTime? ReleaseDate { get; set; }
     public ICollection<string> Genres { get; set; } = [];
-    public int Followers { get; set; }
+    public ulong Followers { get; set; }
     public string StoreUrl { get; set; } = string.Empty;
     public string PosterUrl { get; set; } = string.Empty;
     public string ShortDescription { get; set; } = string.Empty;
     public ICollection<string> Platforms { get; set; } = [];
     public DateTime CollectedAt { get; set; }
 
-    public static GameResponse FromEntity(GameReleases.Infrastructure.Entities.Game game) =>
+    public static GameResponse FromEntity(Game game) =>
         new GameResponse
         {
             Id = game.Id,
@@ -131,7 +133,7 @@ public class GenreDynamicsResponse
 
 public class SteamSearchResult
 {
-    public string AppId { get; init; } = string.Empty;
+    public ulong AppId { get; init; }
     public DateTime? ReleaseDate { get; init; }
 }
 

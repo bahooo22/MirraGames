@@ -10,6 +10,7 @@ using GameReleases.Infrastructure.Interfaces;
 
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace GameReleases.Infrastructure.Repositories;
 
@@ -188,40 +189,66 @@ public class Repository<TEntity> : IRepository<TEntity>
 public class ClickHouseAnalyticsRepository : IAnalyticsRepository
 {
     private readonly string _connectionString;
+    private readonly ILogger<ClickHouseAnalyticsRepository> _logger;
 
-    public ClickHouseAnalyticsRepository(IConfiguration configuration)
+    public ClickHouseAnalyticsRepository(IConfiguration configuration, ILogger<ClickHouseAnalyticsRepository> logger)
     {
         _connectionString = configuration.GetConnectionString("ClickHouseConnection")
                             ?? throw new InvalidOperationException("ClickHouse connection string not configured");
+        _logger = logger;
     }
 
+    // =====================================================
+    // STORE GAME ANALYTICS
+    // =====================================================
     /// <summary>
-    /// Сохраняет снапшот игры в ClickHouse (по жанрам).
+    /// Сохраняет информацию об игре и её жанрах в ClickHouse.
     /// </summary>
     public async Task StoreGameAnalyticsAsync(Game game)
     {
+        if (game == null || game.Genres == null || game.Genres.Count == 0)
+        {
+            _logger?.LogWarning("⚠️ Skipping game analytics storage: invalid game or empty genres.");
+            return;
+        }
+
         await using var conn = new ClickHouseConnection(_connectionString);
         await conn.OpenAsync();
+        await EnsureClickHouseReadyAsync(conn);
 
-        var sql = @"INSERT INTO game_analytics 
-                    (CollectedAt, Genre, GamesCount, AvgFollowers, Month)
-                    VALUES (@collectedAt, @genre, @gamesCount, @avgFollowers, @month)";
+        const string sql = @"
+            INSERT INTO game_analytics.games 
+            (AppId, Name, ReleaseDate, Genres, Followers, Description, Platforms, StoreUrl, PosterUrl, CollectedAt)
+            VALUES (@appId, @name, @releaseDate, @genres, @followers, @desc, @platforms, @storeUrl, @posterUrl, @collectedAt)";
 
-        foreach (var genre in game.Genres)
+        try
         {
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = sql;
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "appId", Value = game.AppId });
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "name", Value = game.Name ?? "" });
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "releaseDate", Value = game.ReleaseDate ?? DateTime.UtcNow });
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "genres", Value = game.Genres.ToArray() });
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "followers", Value = (ulong)game.Followers });
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "desc", Value = game.ShortDescription ?? "" });
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "platforms", Value = game.Platforms?.ToArray() ?? Array.Empty<string>() });
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "storeUrl", Value = game.StoreUrl ?? "" });
+            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "posterUrl", Value = game.PosterUrl ?? "" });
             cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "collectedAt", Value = game.CollectedAt });
-            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "genre", Value = genre });
-            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "gamesCount", Value = 1 });
-            cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "avgFollowers", Value = game.Followers });
-            cmd.Parameters.Add(new ClickHouseDbParameter
-            { ParameterName = "month", Value = game.ReleaseDate?.ToString("yyyy-MM") ?? "" });
 
             await cmd.ExecuteNonQueryAsync();
+            _logger?.LogInformation("✅ Stored analytics for game '{Name}' ({AppId}) with {Genres} genres.", game.Name, game.AppId, game.Genres.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "❌ Failed to store analytics for game {AppId}", game.AppId);
+            throw;
         }
     }
 
+    // =====================================================
+    // GET GENRE ANALYTICS
+    // =====================================================
     /// <summary>
     /// Возвращает агрегированную статистику по жанрам за период.
     /// </summary>
@@ -231,36 +258,55 @@ public class ClickHouseAnalyticsRepository : IAnalyticsRepository
 
         await using var conn = new ClickHouseConnection(_connectionString);
         await conn.OpenAsync();
+        _logger?.LogInformation("📡 Connected to ClickHouse for genre analytics: {Start} - {End}", startDate, endDate);
 
-        var sql = @"SELECT Genre,
-                           count() AS GameCount,
-                           avg(AvgFollowers) AS AvgFollowers,
-                           toStartOfMonth(CollectedAt) AS Period
-                    FROM game_analytics
-                    WHERE CollectedAt BETWEEN @start AND @end
-                    GROUP BY Genre, Period
-                    ORDER BY Period, GameCount DESC";
+        await EnsureClickHouseReadyAsync(conn);
+
+        var sql = @"
+            SELECT 
+                arrayJoin(Genres) AS Genre,
+                count() AS GameCount,
+                avg(Followers) AS AvgFollowers,
+                toStartOfMonth(CollectedAt) AS Period
+            FROM game_analytics.games
+            WHERE CollectedAt BETWEEN @start AND @end
+            GROUP BY Genre, Period
+            ORDER BY Period ASC, GameCount DESC
+            LIMIT 50";
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "start", Value = startDate });
         cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "end", Value = endDate });
 
-        await using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        try
         {
-            result.Add(new GenreAnalytics
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
             {
-                Genre = reader.GetString(0),
-                GameCount = reader.GetInt32(1),
-                AvgFollowers = reader.GetDouble(2),
-                Period = reader.GetDateTime(3)
-            });
+                result.Add(new GenreAnalytics
+                {
+                    Genre = reader.GetString(0),
+                    GameCount = reader.GetInt32(1),
+                    AvgFollowers = reader.GetDouble(2),
+                    Period = reader.GetDateTime(3)
+                });
+            }
+
+            _logger?.LogInformation("✅ Retrieved {Count} genre analytics records from ClickHouse.", result.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "❌ Error reading genre analytics from ClickHouse.");
+            throw;
         }
 
         return result;
     }
 
+    // =====================================================
+    // GET DAILY RELEASES
+    // =====================================================
     /// <summary>
     /// Возвращает количество релизов по дням.
     /// </summary>
@@ -270,75 +316,157 @@ public class ClickHouseAnalyticsRepository : IAnalyticsRepository
 
         await using var conn = new ClickHouseConnection(_connectionString);
         await conn.OpenAsync();
+        _logger?.LogInformation("📡 Connected to ClickHouse for daily releases: {Start} - {End}", startDate, endDate);
 
-        var sql = @"SELECT toDate(ReleaseDate) AS Date, count() AS Count
-                    FROM games
-                    WHERE ReleaseDate BETWEEN @start AND @end
-                    GROUP BY Date
-                    ORDER BY Date";
+        await EnsureClickHouseReadyAsync(conn);
+
+        var sql = @"
+            SELECT toDate(ReleaseDate) AS Date, count() AS Count
+            FROM game_analytics.games
+            WHERE ReleaseDate BETWEEN @start AND @end
+            GROUP BY Date
+            ORDER BY Date";
 
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "start", Value = startDate });
         cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "end", Value = endDate });
 
-        await using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        try
         {
-            result.Add(new DailyReleaseCount
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
             {
-                Date = reader.GetDateTime(0),
-                Count = reader.GetInt32(1)
-            });
+                result.Add(new DailyReleaseCount
+                {
+                    Date = reader.GetDateTime(0),
+                    Count = reader.GetInt32(1)
+                });
+            }
+
+            _logger?.LogInformation("✅ Retrieved {Count} daily release records from ClickHouse.", result.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "❌ Error reading daily releases from ClickHouse.");
+            throw;
         }
 
         return result;
     }
 
+    // =====================================================
+    // GET GENRE DYNAMICS
+    // =====================================================
     /// <summary>
     /// Возвращает динамику по жанрам за несколько месяцев.
     /// </summary>
     public async Task<List<GenreDynamics>> GetGenreDynamicsAsync(IEnumerable<string> months)
     {
         var result = new List<GenreDynamics>();
+        var monthsList = months?.ToList() ?? new List<string>();
+
+        if (monthsList.Count == 0)
+            throw new ArgumentException("Parameter 'months' must contain at least one month (e.g. ['2025-11']).");
 
         await using var conn = new ClickHouseConnection(_connectionString);
         await conn.OpenAsync();
+        _logger?.LogInformation("📡 Connected to ClickHouse for genre dynamics (months: {Months})", string.Join(", ", monthsList));
 
-        var sql = @"SELECT arrayJoin(Genres) AS Genre,
-                           formatDateTime(ReleaseDate, '%Y-%m') AS Month,
-                           count() AS GamesCount,
-                           avg(Followers) AS AvgFollowers
-                    FROM games
-                    WHERE formatDateTime(ReleaseDate, '%Y-%m') IN @months
-                    GROUP BY Genre, Month
-                    ORDER BY Month, GamesCount DESC";
+        await EnsureClickHouseReadyAsync(conn);
 
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = sql;
-        cmd.Parameters.Add(new ClickHouseDbParameter { ParameterName = "months", Value = months.ToArray() });
+        var monthsCsv = string.Join(",", monthsList.Select(m => $"'{m}'"));
 
-        await using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        var sql = $@"
+            SELECT arrayJoin(Genres) AS Genre,
+                   formatDateTime(ReleaseDate, '%Y-%m') AS Month,
+                   count() AS GamesCount,
+                   avg(Followers) AS AvgFollowers
+            FROM game_analytics.games
+            WHERE formatDateTime(ReleaseDate, '%Y-%m') IN ({monthsCsv})
+            GROUP BY Genre, Month
+            ORDER BY Month, GamesCount DESC";
+
+        try
         {
-            result.Add(new GenreDynamics
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = sql;
+
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
             {
-                Genre = reader.GetString(0),
-                Month = reader.GetString(1),
-                GamesCount = reader.GetInt32(2),
-                AvgFollowers = reader.GetDouble(3)
-            });
+                result.Add(new GenreDynamics
+                {
+                    Genre = reader.GetString(0),
+                    Month = reader.GetString(1),
+                    GamesCount = reader.GetInt32(2),
+                    AvgFollowers = reader.GetDouble(3)
+                });
+            }
+
+            _logger?.LogInformation("✅ Retrieved {Count} genre dynamics records from ClickHouse.", result.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "❌ Error reading genre dynamics from ClickHouse.");
+            throw;
         }
 
         return result;
     }
 
+    /// <summary>
+    /// ENSURE DATABASE AND TABLES
+    /// </summary>
+    /// <param name="conn"></param>
+    /// <returns></returns>
+    private async Task EnsureClickHouseReadyAsync(ClickHouseConnection conn)
+    {
+        try
+        {
+            // Создание базы, если нет
+            await using (var dbCmd = conn.CreateCommand())
+            {
+                dbCmd.CommandText = "CREATE DATABASE IF NOT EXISTS game_analytics";
+                await dbCmd.ExecuteNonQueryAsync();
+                _logger?.LogInformation("✅ ClickHouse database 'game_analytics' checked/created.");
+            }
 
+            // Создание таблицы, если нет
+            await using (var tableCmd = conn.CreateCommand())
+            {
+                tableCmd.CommandText = @"
+                    CREATE TABLE IF NOT EXISTS game_analytics.games
+                    (
+                        AppId UInt64,
+                        Name String,
+                        ReleaseDate DateTime,
+                        Genres Array(String),
+                        Followers UInt64,
+                        Description String,
+                        Platforms Array(String),
+                        StoreUrl String,
+                        PosterUrl String,
+                        CollectedAt DateTime DEFAULT now()
+                    )
+                    ENGINE = MergeTree()
+                    PARTITION BY toYYYYMM(CollectedAt)
+                    ORDER BY (AppId, CollectedAt)";
+                await tableCmd.ExecuteNonQueryAsync();
+                _logger?.LogInformation("✅ ClickHouse table 'game_analytics.games' checked/created.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "❌ Failed to ensure ClickHouse database or table.");
+            throw;
+        }
+    }
 }
 
 public class GameRepository(AppDbContext context) : Repository<Game>(context), IGameRepository
 {
-    public async Task<Game?> GetByAppIdAsync(string appId)
+    public async Task<Game?> GetByAppIdAsync(ulong appId)
     {
         return await _dbSet.FirstOrDefaultAsync(g => g.AppId == appId);
     }

@@ -68,7 +68,7 @@ public interface IServices<TEntity, TId, TCreateRequest, TUpdateRequest, TRespon
 
 public interface ISteamFollowersService
 {
-    Task<int> GetFollowersAsync(string appId, CancellationToken ct = default);
+    Task<ulong> GetFollowersAsync(ulong appId, CancellationToken ct = default);
 }
 
 public interface IGameService : IServices<Game, Guid, CreateGameRequest, UpdateGameRequest, GameResponse>
@@ -78,7 +78,7 @@ public interface IGameService : IServices<Game, Guid, CreateGameRequest, UpdateG
     /// </summary>
     /// <param name="appId"></param>
     /// <returns></returns>
-    Task<GameResponse?> GetByAppIdAsync(string appId);
+    Task<GameResponse?> GetByAppIdAsync(ulong appId);
     Task<IEnumerable<GameResponse>> GetByGenreAsync(string genre);
     Task<IEnumerable<GameResponse>> GetRecentGamesAsync(int days = 7);
     Task<IEnumerable<GameResponse>> GetPopularGamesAsync(int count = 10);
@@ -88,13 +88,13 @@ public interface IGameService : IServices<Game, Guid, CreateGameRequest, UpdateG
         string? searchTerm = null,
         string? genre = null,
         string? platform = null);
-    Task<bool> ExistsByAppIdAsync(string appId);
+    Task<bool> ExistsByAppIdAsync(ulong appId);
 
-    Task<IEnumerable<GameResponse>> GetReleasesAsync(string month, string? platform = null, string? genre = null);
-    Task<CalendarResponse> GetCalendarAsync(string month);
+    Task<IEnumerable<GameResponse>> GetReleasesAsync(string month = "2025-11", string? platform = null, string? genre = null);
+    Task<CalendarResponse> GetCalendarAsync(string month = "2025-11");
 
     Task<PagedResponse<GameResponse>> GetReleasesPagedAsync(
-        string month,
+        string month = "2025-11",
         string? platform = null,
         string? genre = null,
         int pageNumber = 1,
@@ -103,18 +103,19 @@ public interface IGameService : IServices<Game, Guid, CreateGameRequest, UpdateG
 
 public interface IAnalyticsService
 {
-    Task<IEnumerable<GenreStatsResponse>> GetTopGenresAsync(string month);
-    Task<GenreDynamicsResultResponse> GetDynamicsAsync(string monthsCsv);
+    Task<IEnumerable<GenreStatsResponse>> GetTopGenresAsync(string month = "2025-11");
+    Task<GenreDynamicsResultResponse> GetDynamicsAsync(string monthsCsv = "2025-10,2025-11,2025-12");
+    Task<GenreDynamicsResultResponse> GetLastThreeMonthsDynamicsAsync();
 }
 
 
 public interface ISteamService
 {
     Task SyncUpcomingGamesAsync(DateTime startDate, DateTime endDate); // Синхронизация данных
-    Task<IEnumerable<Game>> GetReleasesAsync(string month); // e.g., "2025-11"
-    Task<IEnumerable<object>> GetCalendarAsync(string month); // Агрегированный календарь
-    Task<IEnumerable<object>> GetTopGenresAsync(string month); // Топ-5 жанров
-    Task<object> GetDynamicsAsync(string month); // Динамика за 3 месяца
+    Task<IEnumerable<Game>> GetReleasesAsync(string month = "2025-11"); // e.g., "2025-11"
+    Task<IEnumerable<object>> GetCalendarAsync(string month = "2025-11"); // Агрегированный календарь
+    Task<IEnumerable<object>> GetTopGenresAsync(string month = "2025-11"); // Топ-5 жанров
+    Task<object> GetDynamicsAsync(string month = "2025-11"); // Динамика за 3 месяца
 }
 
 public interface ISteamSyncService

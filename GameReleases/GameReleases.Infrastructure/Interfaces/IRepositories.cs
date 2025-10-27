@@ -44,7 +44,7 @@ public interface IRepository<TEntity> where TEntity : class
 
 public interface IGameRepository : IRepository<Game>
 {
-    Task<Game?> GetByAppIdAsync(string appId);
+    Task<Game?> GetByAppIdAsync(ulong appId);
     Task<IEnumerable<Game>> GetByGenreAsync(string genre);
     Task<IEnumerable<Game>> GetRecentGamesAsync(int days = 7);
     Task<IEnumerable<Game>> GetPopularGamesAsync(int count = 10);

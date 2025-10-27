@@ -18,6 +18,13 @@ namespace GameReleases.Infrastructure.Data
         {
             base.OnModelCreating(modelBuilder);
 
+            // Компаратор для коллекций строк
+            var collectionComparer = new ValueComparer<ICollection<string>>(
+                (c1, c2) => c1 != null && c2 != null && c1.SequenceEqual(c2),
+                c => c.Aggregate(0, (a, v) => HashCode.Combine(a, v.GetHashCode())),
+                c => (ICollection<string>)c.ToList()
+            );
+
             modelBuilder.Entity<Game>(entity =>
             {
                 entity.HasKey(g => g.Id);
@@ -36,13 +43,6 @@ namespace GameReleases.Infrastructure.Data
                 entity.Property(g => g.PosterUrl).HasMaxLength(500);
                 entity.Property(g => g.ShortDescription).HasMaxLength(1000);
 
-                // Универсальный компаратор для HashSet<string>
-                var collectionComparer = new ValueComparer<ICollection<string>>(
-                    (c1, c2) => c1 != null && c2 != null && c1.SequenceEqual(c2),
-                    c => c.Aggregate(0, (a, v) => HashCode.Combine(a, v.GetHashCode())),
-                    c => (ICollection<string>)c.ToList()
-                );
-
                 entity.Property(g => g.Genres)
                     .HasConversion(
                         v => string.Join(';', v),
@@ -54,7 +54,6 @@ namespace GameReleases.Infrastructure.Data
                         v => string.Join(';', v),
                         v => (ICollection<string>)v.Split(';', StringSplitOptions.RemoveEmptyEntries).ToList(),
                         collectionComparer);
-
 
                 entity.HasIndex(g => g.ReleaseDate);
                 entity.HasIndex(g => g.CollectedAt);
@@ -74,7 +73,12 @@ namespace GameReleases.Infrastructure.Data
                 entity.Property(gh => gh.Genres)
                     .HasConversion(
                         v => string.Join(';', v),
-                        v => v.Split(';', StringSplitOptions.RemoveEmptyEntries).ToList()
+                        v => v.Split(';', StringSplitOptions.RemoveEmptyEntries).ToList(),
+                        new ValueComparer<ICollection<string>>(
+                            (c1, c2) => c1 != null && c2 != null && c1.SequenceEqual(c2),
+                            c => c.Aggregate(0, (a, v) => HashCode.Combine(a, v.GetHashCode())),
+                            c => (ICollection<string>)c.ToList()
+                        )
                     )
                     .HasColumnType("text");
             });

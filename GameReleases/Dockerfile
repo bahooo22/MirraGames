@@ -28,7 +28,7 @@ ENV PATH="/root/.dotnet/tools:${PATH}"
 # Копируем весь исходный код
 COPY . .
 WORKDIR /src/GameReleases.WebApi
-RUN dotnet build -c Release -o /app/build --no-restore
+RUN dotnet build -c Release -o /app/build
 
 
 ##########################################

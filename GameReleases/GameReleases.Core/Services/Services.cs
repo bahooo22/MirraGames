@@ -260,7 +260,7 @@ public class SteamFollowersService : ISteamFollowersService, IAsyncDisposable, I
 {
     private readonly ILogger<SteamFollowersService> _logger;
     private readonly SemaphoreSlim _semaphore = new(2, 2);
-    private readonly Dictionary<string, (DateTime fetched, int followers)> _cache = new();
+    private readonly Dictionary<ulong, (DateTime fetched, ulong followers)> _cache = new();
 
     private IPlaywright? _playwright;
     private IBrowser? _browser;
@@ -295,7 +295,7 @@ public class SteamFollowersService : ISteamFollowersService, IAsyncDisposable, I
         _page = await _context.NewPageAsync();
     }
 
-    public async Task<int> GetFollowersAsync(string appId, CancellationToken ct = default)
+    public async Task<ulong> GetFollowersAsync(ulong appId, CancellationToken ct = default)
     {
         if (_page == null)
             await InitializeAsync();
@@ -325,7 +325,7 @@ public class SteamFollowersService : ISteamFollowersService, IAsyncDisposable, I
                 var normalized = membersText.Trim().Replace("\u00A0", "").Replace(" ", "");
                 _logger.LogInformation("Normalized text for AppId={AppId}: '{Text}'", appId, normalized);
 
-                if (int.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out var followers))
+                if (ulong.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out var followers))
                 {
                     _cache[appId] = (DateTime.UtcNow, followers);
                     _logger.LogInformation("✔ Parsed {Followers} followers for AppId={AppId}", followers, appId);
@@ -334,7 +334,7 @@ public class SteamFollowersService : ISteamFollowersService, IAsyncDisposable, I
                 else
                 {
                     var digits = Regex.Match(normalized, @"\d+").Value;
-                    if (int.TryParse(digits, out followers))
+                    if (ulong.TryParse(digits, out followers))
                     {
                         _cache[appId] = (DateTime.UtcNow, followers);
                         _logger.LogInformation("✔ Parsed {Followers} followers for AppId={AppId}", followers, appId);
@@ -524,7 +524,7 @@ public class GameService(
     /// </summary>
     /// <param name="appId"></param>
     /// <returns></returns>
-    public async Task<GameResponse?> GetByAppIdAsync(string appId)
+    public async Task<GameResponse?> GetByAppIdAsync(ulong appId)
     {
         try
         {
@@ -632,7 +632,7 @@ public class GameService(
         }
     }
 
-    public async Task<bool> ExistsByAppIdAsync(string appId)
+    public async Task<bool> ExistsByAppIdAsync(ulong appId)
     {
         try
         {
@@ -690,26 +690,89 @@ public class AnalyticsService : IAnalyticsService
                                  .OrderBy(m => m)
                                  .ToList();
 
+        // Если месяцев не указано, используем последние 3 месяца как в ТЗ
+        if (monthList.Count == 0)
+        {
+            var now = DateTime.UtcNow;
+            monthList = new List<string>
+            {
+                now.AddMonths(-2).ToString("yyyy-MM"),
+                now.AddMonths(-1).ToString("yyyy-MM"),
+                now.ToString("yyyy-MM")
+            };
+            _logger.LogInformation("Using default last 3 months: {Months}", string.Join(", ", monthList));
+        }
+
         var dynamics = await _analyticsRepository.GetGenreDynamicsAsync(monthList);
 
-        var grouped = dynamics.GroupBy(d => d.Genre);
+        // Получаем топ-5 жанров по играм за все периоды
+        var topGenres = dynamics
+            .GroupBy(d => d.Genre)
+            .Select(g => new { Genre = g.Key, TotalGames = g.Sum(x => x.GamesCount) })
+            .OrderByDescending(x => x.TotalGames)
+            .Take(5)
+            .Select(x => x.Genre)
+            .ToList();
+
+        _logger.LogInformation("Top 5 genres for dynamics: {Genres}", string.Join(", ", topGenres));
+
+        // Фильтруем динамику только для топ-5 жанров
+        var filteredDynamics = dynamics
+            .Where(d => topGenres.Contains(d.Genre))
+            .ToList();
+
+        var grouped = filteredDynamics.GroupBy(d => d.Genre);
 
         var series = grouped.Select(g => new GenreDynamicsSeriesResponse
         {
             Genre = g.Key,
-            Counts = monthList.Select(m => g.Where(x => x.Month == m).Sum(x => x.GamesCount)).ToList(),
+            Counts = monthList.Select(m =>
+                g.Where(x => x.Month == m).Sum(x => x.GamesCount)
+            ).ToList(),
             AvgFollowers = monthList.Select(m =>
-                g.Where(x => x.Month == m).Any()
-                    ? (int)Math.Round(g.Where(x => x.Month == m).Average(x => x.AvgFollowers))
-                    : 0
-            ).ToList()
+            {
+                var monthData = g.Where(x => x.Month == m).ToList();
+                return monthData.Any()
+                    ? (int)Math.Round(monthData.Average(x => x.AvgFollowers))
+                    : 0;
+            }).ToList()
         }).ToList();
+
+        // Добавляем недостающие жанры с нулевыми значениями
+        foreach (var genre in topGenres.Where(genre => !series.Any(s => s.Genre == genre)))
+        {
+            series.Add(new GenreDynamicsSeriesResponse
+            {
+                Genre = genre,
+                Counts = monthList.Select(_ => 0).ToList(),
+                AvgFollowers = monthList.Select(_ => 0).ToList()
+            });
+        }
 
         return new GenreDynamicsResultResponse
         {
             Months = monthList,
-            Series = series
+            Series = series.OrderByDescending(s => s.Counts.Sum()).ToList()
         };
+    }
+
+    /// <summary>
+    /// НОВЫЙ МЕТОД: Получить динамику за последние 3 месяца 
+    /// </summary>
+    /// <returns></returns>
+    public async Task<GenreDynamicsResultResponse> GetLastThreeMonthsDynamicsAsync()
+    {
+        var now = DateTime.UtcNow;
+        var months = new List<string>
+        {
+            now.AddMonths(-2).ToString("yyyy-MM"), // сентябрь
+            now.AddMonths(-1).ToString("yyyy-MM"), // октябрь  
+            now.ToString("yyyy-MM")                // ноябрь
+        };
+
+        _logger.LogInformation("Getting dynamics for last 3 months: {Months}", string.Join(", ", months));
+
+        return await GetDynamicsAsync(string.Join(",", months));
     }
 }
 
@@ -890,12 +953,21 @@ public class SteamService : ISteamService
 
                     if (releaseDate.Value >= startDate && releaseDate.Value <= endDate)
                     {
-                        var appId = dataDsAppid.Split(',')[0];
-                        results.Add(new SteamSearchResult
+                        var appIdString = dataDsAppid.Split(',')[0];
+
+                        // Конвертируем string в ulong
+                        if (ulong.TryParse(appIdString, out ulong appId))
                         {
-                            AppId = appId,
-                            ReleaseDate = releaseDate.Value
-                        });
+                            results.Add(new SteamSearchResult
+                            {
+                                AppId = appId,  // ← теперь ulong
+                                ReleaseDate = releaseDate.Value
+                            });
+                        }
+                        else
+                        {
+                            _logger.LogWarning("Failed to parse AppId: {AppIdString}", appIdString);
+                        }
                     }
                 }
             }
@@ -906,6 +978,7 @@ public class SteamService : ISteamService
             }
         }
 
+        _logger.LogInformation("Found {Count} upcoming games", results.Count);
         return results;
     }
 
@@ -1017,13 +1090,13 @@ public class SteamService : ISteamService
     /// <param name="appId"></param>
     /// <param name="releaseDate"></param>
     /// <returns></returns>
-    private async Task<Game?> GetGameDetailsAsync(string appId, DateTime? releaseDate)
+    private async Task<Game?> GetGameDetailsAsync(ulong appId, DateTime? releaseDate)
     {
         var detailsUrl = $"https://store.steampowered.com/api/appdetails?appids={appId}";
         try
         {
             var json = await _httpClient.GetStringAsync(detailsUrl);
-            var detailsDict = JsonSerializer.Deserialize<Dictionary<string, AppDetails>>(json);
+            var detailsDict = JsonSerializer.Deserialize<Dictionary<ulong, AppDetails>>(json);
             if (detailsDict == null || !detailsDict.TryGetValue(appId, out var appDetails) || !appDetails.success)
                 return null;
 
@@ -1133,11 +1206,21 @@ public class SteamService : ISteamService
         foreach (var range in ranges)
         {
             var games = await _gameRepository.GetGamesByDateRangeAsync(range.Start, range.End);
+            var gameList = games.ToList();
+
+            ulong avgFollowers = 0;
+            if (gameList.Count > 0)
+            {
+                double totalFollowers = gameList.Sum(g => (double)g.Followers);
+                double average = totalFollowers / gameList.Count;
+                avgFollowers = (ulong)Math.Round(average);
+            }
+
             result.Add(new
             {
                 month = range.Month,
-                count = games.Count(),
-                avgFollowers = games.Any() ? (int)Math.Round(games.Average(g => g.Followers)) : 0
+                count = gameList.Count,
+                avgFollowers = avgFollowers
             });
         }
 
@@ -1160,11 +1243,17 @@ public class SteamService : ISteamService
         var stats = games
             .SelectMany(g => g.Genres.Select(genre => new { Genre = genre, Game = g }))
             .GroupBy(x => x.Genre)
-            .Select(g => new
+            .Select(g =>
             {
-                genre = g.Key,
-                games = g.Count(),
-                avgFollowers = (int)Math.Round(g.Average(x => x.Game.Followers))
+                double avgValue = g.Any() ? g.Average(x => (double)x.Game.Followers) : 0;
+                ulong avgFollowers = avgValue >= 0 ? (ulong)Math.Round(avgValue) : 0;
+
+                return new
+                {
+                    genre = g.Key,
+                    games = g.Count(),
+                    avgFollowers = avgFollowers
+                };
             })
             .OrderByDescending(x => x.games)
             .Take(5);
@@ -1249,15 +1338,178 @@ public class SteamSyncService : ISteamSyncService
 
         using var scope = _serviceProvider.CreateScope();
         var steamService = scope.ServiceProvider.GetRequiredService<ISteamService>();
+        var gameRepository = scope.ServiceProvider.GetRequiredService<IGameRepository>(); // Репозиторий PostgreSQL
+        var analyticsRepository = scope.ServiceProvider.GetRequiredService<IAnalyticsRepository>(); // Репозиторий ClickHouse
 
         var now = DateTime.UtcNow;
         var startDate = now.AddYears(-1);
         var endDate = now.AddYears(1);
 
-        // Запускаем синхронизацию (сама обновит/создаст игры и подтянет followers)
+        _logger.LogInformation("Sync date range: {StartDate} to {EndDate}", startDate, endDate);
+
+        // Запускаем синхронизацию Steam
+        _logger.LogInformation("Starting Steam service synchronization...");
         await steamService.SyncUpcomingGamesAsync(startDate, endDate);
+        _logger.LogInformation("Steam service synchronization completed");
+
+        // Получаем данные из PostgreSQL
+        _logger.LogInformation("Retrieving games from PostgreSQL database...");
+        var games = await gameRepository.GetGamesByDateRangeAsync(startDate, endDate);
+
+        _logger.LogInformation("Found {GameCount} games in PostgreSQL for analytics", games.Count());
+
+        if (games.Any())
+        {
+            _logger.LogInformation("First game sample: AppId={FirstAppId}, Name={FirstName}",
+                games.First().AppId, games.First().Name);
+        }
+
+        // Сохраняем в ClickHouse
+        await SaveGamesToAnalyticsAsync(games, analyticsRepository);
 
         _logger.LogInformation("Steam data synchronization completed successfully");
+    }
+
+    private async Task SaveGamesToAnalyticsAsync(IEnumerable<Game> games, IAnalyticsRepository analyticsRepository)
+    {
+        if (games == null || !games.Any())
+        {
+            _logger.LogWarning("No games to save to analytics");
+            return;
+        }
+
+        _logger.LogInformation("Starting analytics storage for {GameCount} games to ClickHouse", games.Count());
+
+        // DEV DEBUG: Validate data compatibility
+        var gameList = games.ToList();
+        _logger.LogDebug("DEV - Data compatibility check:");
+
+        // В методе SaveGamesToAnalyticsAsync обновите логи валидации:
+        foreach (var game in gameList.Take(3))
+        {
+            _logger.LogDebug("DEV - Game validation: AppId={AppId}, " +
+                             "ReleaseDate={ReleaseDate} (has value: {HasReleaseDate}), " +
+                             "Genres count={GenresCount}, Followers={Followers}, " +
+                             "Platforms count={PlatformsCount}, CollectedAt={CollectedAt}",
+                game.AppId,  // ← теперь просто ulong, без конвертации
+                game.ReleaseDate?.ToString("yyyy-MM-dd") ?? "NULL",
+                game.ReleaseDate.HasValue,
+                game.Genres?.Count ?? 0,
+                game.Followers,
+                game.Platforms?.Count ?? 0,
+                game.CollectedAt);
+        }
+        int successCount = 0;
+        int errorCount = 0;
+        var failedGames = new List<(ulong AppId, string Error)>();
+
+        foreach (var game in gameList)
+        {
+            try
+            {
+                // DEV DEBUG: Pre-storage validation
+                var validationErrors = ValidateGameForClickHouse(game);
+                if (validationErrors.Any())
+                {
+                    _logger.LogWarning("DEV - Game validation failed for AppId={AppId}: {Errors}",
+                        game.AppId, string.Join("; ", validationErrors));
+                }
+
+                _logger.LogDebug("Storing game in analytics: AppId={AppId}, Name={Name}, Genres={GenresCount}",
+                    game.AppId, game.Name, game.Genres?.Count ?? 0);
+
+                await analyticsRepository.StoreGameAnalyticsAsync(game);
+                successCount++;
+
+                _logger.LogDebug("Successfully stored game in analytics: AppId={AppId}", game.AppId);
+
+                // Progress tracking
+                if (successCount % 10 == 0)
+                {
+                    _logger.LogInformation("DEV - Storage progress: {SuccessCount}/{TotalCount} games processed",
+                        successCount, gameList.Count);
+                }
+            }
+            catch (Exception ex)
+            {
+                errorCount++;
+                failedGames.Add((game.AppId, ex.Message));
+
+                _logger.LogError(ex, "Failed to store game in analytics: AppId={AppId}, Name={Name}",
+                    game.AppId, game.Name);
+
+                // Detailed error analysis
+                _logger.LogDebug("DEV - Error analysis for AppId={AppId}: {ErrorType} - {ErrorMessage}",
+                    game.AppId, ex.GetType().Name, ex.Message);
+
+                // Specific handling for common issues
+                if (ex.Message.Contains("AppId") || ex.Message.Contains("parsing"))
+                {
+                    _logger.LogWarning("DEV - Possible data type issue with AppId: '{AppId}'", game.AppId);
+                }
+            }
+        }
+
+        // Final summary with detailed analytics
+        _logger.LogInformation("Analytics storage completed: {SuccessCount} successful, {ErrorCount} failed",
+            successCount, errorCount);
+
+        _logger.LogInformation("DEV - Detailed summary: Total={Total}, Success={Success} ({SuccessRate:P2}), Failed={Failed}",
+            gameList.Count, successCount, (double)successCount / gameList.Count, errorCount);
+
+        if (errorCount > 0)
+        {
+            _logger.LogWarning("Some games failed to save to analytics: {ErrorCount} errors", errorCount);
+
+            _logger.LogWarning("DEV - Failed games analysis (first 5):");
+            foreach (var failed in failedGames.Take(5))
+            {
+                _logger.LogWarning("DEV - Failed: AppId={AppId}, Error={Error}", failed.AppId, failed.Error);
+            }
+        }
+        else
+        {
+            _logger.LogInformation("DEV - SUCCESS: All {GameCount} games stored in ClickHouse analytics", gameList.Count);
+        }
+    }
+
+    private List<string> ValidateGameForClickHouse(Game game)
+    {
+        var errors = new List<string>();
+
+        // AppId теперь ulong - проверка не нужна, так как он всегда валидный ulong
+        // Убедитесь, что AppId не равен 0 (значение по умолчанию для ulong)
+        if (game.AppId == 0)
+        {
+            errors.Add("AppId cannot be 0");
+        }
+
+        // Check required fields
+        if (string.IsNullOrWhiteSpace(game.Name))
+        {
+            errors.Add("Game name is empty");
+        }
+
+        if (game.Genres == null || !game.Genres.Any())
+        {
+            errors.Add("No genres specified");
+        }
+
+        // Проверка followers не нужна, так как ulong не может быть отрицательным
+        // ulong всегда >= 0 по определению
+
+        // Дополнительные проверки для ClickHouse
+        if (game.ReleaseDate == null)
+        {
+            errors.Add("ReleaseDate is required for ClickHouse");
+        }
+
+        if (game.CollectedAt == default)
+        {
+            errors.Add("CollectedAt is required for ClickHouse");
+        }
+
+        return errors;
     }
 }
 
