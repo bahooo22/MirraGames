@@ -14,7 +14,7 @@
 docker compose --profile prod up --build
 ```
 или
-### PowerShell (Windows, рекомендуемый)
+### PowerShell (Windows)
 ```powershell
 docker compose --profile dev up --build
 ```
