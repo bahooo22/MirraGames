@@ -1,4 +1,5 @@
-﻿using System.Linq.Expressions;
+﻿using System.Data;
+using System.Linq.Expressions;
 
 using ClickHouse.Client.ADO;
 using ClickHouse.Client.ADO.Parameters;
@@ -287,7 +288,7 @@ public class ClickHouseAnalyticsRepository : IAnalyticsRepository
                 result.Add(new GenreAnalytics
                 {
                     Genre = reader.GetString(0),
-                    GameCount = reader.GetInt32(1),
+                    GameCount = Convert.ToInt32(reader.GetValue(1)),
                     AvgFollowers = reader.GetDouble(2),
                     Period = reader.GetDateTime(3)
                 });
@@ -340,7 +341,7 @@ public class ClickHouseAnalyticsRepository : IAnalyticsRepository
                 result.Add(new DailyReleaseCount
                 {
                     Date = reader.GetDateTime(0),
-                    Count = reader.GetInt32(1)
+                    Count = Convert.ToInt32(reader.GetValue(1))
                 });
             }
 
@@ -399,7 +400,7 @@ public class ClickHouseAnalyticsRepository : IAnalyticsRepository
                 {
                     Genre = reader.GetString(0),
                     Month = reader.GetString(1),
-                    GamesCount = reader.GetInt32(2),
+                    GamesCount = Convert.ToInt32(reader.GetValue(2)),
                     AvgFollowers = reader.GetDouble(3)
                 });
             }
