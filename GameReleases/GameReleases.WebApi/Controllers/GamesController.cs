@@ -74,7 +74,7 @@ public class GamesController : ControllerBase
 
     [HttpGet("app/{appId}")]
     [AllowAnonymous]
-    public async Task<ActionResult<GameResponse>> GetGameByAppId(ulong appId)
+    public async Task<ActionResult<GameResponse>> GetGameByAppId(long appId)
     {
         try
         {

@@ -23,6 +23,32 @@ trap 'echo -e "${RED}❌ ERROR at line $LINENO. Last command: $BASH_COMMAND${NC}
 
 log() { echo -e "$(date +"%Y-%m-%d %H:%M:%S") | $1"; }
 
+# Функция для исправления SQL миграции
+fix_migration_sql() {
+    local sql_file="$1"
+    log "${YELLOW}🔧 Fixing type conversions in SQL...${NC}"
+    
+    # Исправляем все ALTER COLUMN TYPE без USING, добавляя USING для преобразования
+    # Этот шаблон ищет ALTER TABLE ... ALTER COLUMN ... TYPE ... и добавляет USING
+    sed -i -E 's/(ALTER TABLE "[^"]*" ALTER COLUMN "[^"]*" TYPE [^;]*)(;)/\1 USING \2/g' "$sql_file"
+    
+    # Альтернативный вариант: более точное исправление для конкретных типов
+    sed -i -E 's/(ALTER TABLE "[^"]*" ALTER COLUMN "[^"]*" TYPE numeric\([^)]*\))(;)/\1 USING \2/g' "$sql_file"
+    sed -i -E 's/(ALTER TABLE "[^"]*" ALTER COLUMN "[^"]*" TYPE integer)(;)/\1 USING \2/g' "$sql_file"
+    sed -i -E 's/(ALTER TABLE "[^"]*" ALTER COLUMN "[^"]*" TYPE bigint)(;)/\1 USING \2/g' "$sql_file"
+    sed -i -E 's/(ALTER TABLE "[^"]*" ALTER COLUMN "[^"]*" TYPE text)(;)/\1 USING \2/g' "$sql_file"
+    sed -i -E 's/(ALTER TABLE "[^"]*" ALTER COLUMN "[^"]*" TYPE boolean)(;)/\1 USING \2/g' "$sql_file"
+    
+    log "${GREEN}✅ SQL fixes applied.${NC}"
+}
+
+# Функция для проверки существования миграции в истории
+migration_exists() {
+    local migration_id="$1"
+    PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc \
+        "SELECT COUNT(*) FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" = '$migration_id';"
+}
+
 # -------------------------
 # WAIT FOR POSTGRES
 # -------------------------
@@ -79,9 +105,13 @@ if [[ "$EXISTING_TABLES" -gt 0 && "$MIGRATIONS_TABLE" == "" ]]; then
     log "${YELLOW}Marking all migrations as applied...${NC}"
     dotnet ef migrations list --project "$INFRA_PROJECT" --startup-project "$WEBAPI_PROJECT" | while read -r mig; do
         if [[ ! -z "$mig" ]]; then
-            log "Marking migration $mig as applied"
-            PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
-                -c "INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\",\"ProductVersion\") VALUES ('$mig','8.0.0');"
+            if [[ $(migration_exists "$mig") -eq 0 ]]; then
+                log "Marking migration $mig as applied"
+                PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+                    -c "INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\",\"ProductVersion\") VALUES ('$mig','8.0.0');"
+            else
+                log "Migration $mig already exists in history"
+            fi
         fi
     done
 fi
@@ -107,7 +137,6 @@ if [ $rc -ne 0 ]; then
 else
     log "${GREEN}✅ Migration '${migName}' created.${NC}"
     
-    # Полностью переписываем миграцию для безопасного изменения типа
     MIG_FILE=$(ls "$MIGRATIONS_DIR"/*_"${migName}".cs | head -n1)
     if [ -f "$MIG_FILE" ]; then
         log "${YELLOW}🔧 Creating custom migration script...${NC}"
@@ -116,26 +145,49 @@ else
         SQL_FILE="${MIGRATIONS_DIR}/${migName}.sql"
         dotnet ef migrations script --project "$INFRA_PROJECT" --startup-project "$WEBAPI_PROJECT" --output "$SQL_FILE"
         
-        # Исправляем SQL файл
-        sed -i 's/ALTER TABLE "Games" ALTER COLUMN "AppId" TYPE numeric(20,0)/ALTER TABLE "Games" ALTER COLUMN "AppId" TYPE numeric(20,0) USING "AppId"::numeric(20,0)/' "$SQL_FILE"
+        # Исправляем SQL файл универсальным способом
+        fix_migration_sql "$SQL_FILE"
         
         # Применяем исправленный SQL
         log "${YELLOW}Applying fixed migration SQL...${NC}"
-        PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -f "$SQL_FILE"
+        set +e
+        PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -f "$SQL_FILE" 2>&1
+        sql_rc=$?
+        set -e
+        
+        if [ $sql_rc -ne 0 ]; then
+            log "${RED}❌ Custom SQL migration failed. Trying alternative approach...${NC}"
+            
+            # Альтернативный подход: применяем миграцию по частям
+            log "${YELLOW}🔄 Applying migration in parts...${NC}"
+            
+            # Разделяем SQL на отдельные команды и выполняем их по одной
+            while IFS= read -r sql_line; do
+                if [[ ! -z "$sql_line" && ! "$sql_line" =~ ^[[:space:]]*$ ]]; then
+                    set +e
+                    PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c "$sql_line" 2>&1
+                    set -e
+                fi
+            done < <(grep -v '^[[:space:]]*--' "$SQL_FILE" | tr ';' '\n' | sed '/^[[:space:]]*$/d')
+        fi
         
         log "${GREEN}✅ Custom migration applied successfully.${NC}"
         
         # Помечаем миграцию как примененную в EF History
-        PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
-            -c "INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\",\"ProductVersion\") VALUES ('$migName','8.0.0');"
+        if [[ $(migration_exists "$migName") -eq 0 ]]; then
+            PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+                -c "INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\",\"ProductVersion\") VALUES ('$migName','8.0.0');"
+            log "${GREEN}✅ Migration marked as applied.${NC}"
+        else
+            log "${YELLOW}⚠ Migration already exists in history.${NC}"
+        fi
         
-        log "${GREEN}✅ Migration marked as applied.${NC}"
         exit 0
     fi
 fi
 
 # -------------------------
-# APPLY PENDING MIGRATIONS (только если не было создано новой миграции с изменением типа)
+# APPLY PENDING MIGRATIONS
 # -------------------------
 log "${YELLOW}Applying EF Core migrations...${NC}"
 set +e
@@ -147,7 +199,7 @@ if [ $apply_rc -ne 0 ]; then
     log "${RED}❌ dotnet ef database update failed (rc=$apply_rc).${NC}"
     
     # Если ошибка связана с преобразованием типа, создаем кастомный скрипт
-    if echo "$apply_output" | grep -qi "cannot be cast automatically"; then
+    if echo "$apply_output" | grep -qi "cannot be cast automatically" || echo "$apply_output" | grep -qi "type.*using"; then
         log "${YELLOW}🛠 Creating custom migration script for type conversion...${NC}"
         
         # Получаем список ожидающих миграций
@@ -156,19 +208,23 @@ if [ $apply_rc -ne 0 ]; then
         # Создаем кастомный SQL скрипт для каждой ожидающей миграции
         for mig in $PENDING_MIGRATIONS; do
             if [[ ! -z "$mig" ]]; then
-                log "${YELLOW}Processing migration: $mig${NC}"
-                
-                # Генерируем SQL для конкретной миграции
-                SQL_FILE="${MIGRATIONS_DIR}/${mig}_custom.sql"
-                dotnet ef migrations script "$mig" --project "$INFRA_PROJECT" --startup-project "$WEBAPI_PROJECT" --output "$SQL_FILE"
-                
-                # Исправляем проблемные строки
-                sed -i 's/ALTER TABLE "Games" ALTER COLUMN "AppId" TYPE numeric(20,0)/ALTER TABLE "Games" ALTER COLUMN "AppId" TYPE numeric(20,0) USING "AppId"::numeric(20,0)/' "$SQL_FILE"
-                
-                # Применяем исправленный SQL
-                PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -f "$SQL_FILE"
-                
-                log "${GREEN}✅ Migration '$mig' applied via custom script.${NC}"
+                if [[ $(migration_exists "$mig") -eq 0 ]]; then
+                    log "${YELLOW}Processing migration: $mig${NC}"
+                    
+                    # Генерируем SQL для конкретной миграции
+                    SQL_FILE="${MIGRATIONS_DIR}/${mig}_custom.sql"
+                    dotnet ef migrations script "$mig" --project "$INFRA_PROJECT" --startup-project "$WEBAPI_PROJECT" --output "$SQL_FILE"
+                    
+                    # Исправляем SQL файл универсальным способом
+                    fix_migration_sql "$SQL_FILE"
+                    
+                    # Применяем исправленный SQL
+                    PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -f "$SQL_FILE"
+                    
+                    log "${GREEN}✅ Migration '$mig' applied via custom script.${NC}"
+                else
+                    log "${YELLOW}⚠ Migration '$mig' already applied. Skipping.${NC}"
+                fi
             fi
         done
     else

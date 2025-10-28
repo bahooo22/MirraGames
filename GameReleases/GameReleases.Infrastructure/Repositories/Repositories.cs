@@ -364,7 +364,7 @@ public class ClickHouseAnalyticsRepository : IAnalyticsRepository
     public async Task<List<GenreDynamics>> GetGenreDynamicsAsync(IEnumerable<string> months)
     {
         var result = new List<GenreDynamics>();
-        var monthsList = months?.ToList() ?? new List<string>();
+        var monthsList = months?.ToList() ?? [];
 
         if (monthsList.Count == 0)
             throw new ArgumentException("Parameter 'months' must contain at least one month (e.g. ['2025-11']).");
@@ -466,7 +466,7 @@ public class ClickHouseAnalyticsRepository : IAnalyticsRepository
 
 public class GameRepository(AppDbContext context) : Repository<Game>(context), IGameRepository
 {
-    public async Task<Game?> GetByAppIdAsync(ulong appId)
+    public async Task<Game?> GetByAppIdAsync(long appId)
     {
         return await _dbSet.FirstOrDefaultAsync(g => g.AppId == appId);
     }

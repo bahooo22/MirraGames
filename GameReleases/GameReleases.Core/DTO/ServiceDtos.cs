@@ -11,7 +11,7 @@ namespace GameReleases.Core.DTO;
 public class CreateGameRequest
 {
     [Required]
-    public ulong AppId { get; set; }
+    public long AppId { get; set; }
 
     [Required, StringLength(200)]
     public string Name { get; set; } = string.Empty;
@@ -21,8 +21,8 @@ public class CreateGameRequest
     [MinLength(1, ErrorMessage = "At least one genre is required")]
     public ICollection<string> Genres { get; set; } = [];
 
-    [Range(0, ulong.MaxValue, ErrorMessage = "Followers must be non-negative")]
-    public ulong Followers { get; set; }
+    [Range(0, long.MaxValue, ErrorMessage = "Followers must be non-negative")]
+    public long Followers { get; set; }
 
     [Required, Url]
     public string StoreUrl { get; set; } = string.Empty;
@@ -47,8 +47,8 @@ public class UpdateGameRequest
     [MinLength(1)]
     public ICollection<string> Genres { get; set; } = [];
 
-    [Range(0, ulong.MaxValue)]
-    public ulong Followers { get; set; }
+    [Range(0, long.MaxValue)]
+    public long Followers { get; set; }
 
     [Required, Url]
     public string StoreUrl { get; set; } = string.Empty;
@@ -70,11 +70,11 @@ public class UpdateGameRequest
 public class GameResponse
 {
     public Guid Id { get; init; }
-    public ulong AppId { get; set; }
+    public long AppId { get; set; }
     public string Name { get; set; } = string.Empty;
     public DateTime? ReleaseDate { get; set; }
     public ICollection<string> Genres { get; set; } = [];
-    public ulong Followers { get; set; }
+    public long Followers { get; set; }
     public string StoreUrl { get; set; } = string.Empty;
     public string PosterUrl { get; set; } = string.Empty;
     public string ShortDescription { get; set; } = string.Empty;
@@ -133,7 +133,7 @@ public class GenreDynamicsResponse
 
 public class SteamSearchResult
 {
-    public ulong AppId { get; init; }
+    public long AppId { get; init; }
     public DateTime? ReleaseDate { get; init; }
 }
 
@@ -141,7 +141,7 @@ public class GenreDynamicsSeriesResponse
 {
     public string Genre { get; set; } = string.Empty;
     public List<int> Counts { get; set; } = [];
-    public List<int> AvgFollowers { get; set; } = [];
+    public List<double> AvgFollowers { get; set; } = [];
 }
 
 public class GenreDynamicsResultResponse

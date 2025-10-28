@@ -68,7 +68,7 @@ public interface IServices<TEntity, TId, TCreateRequest, TUpdateRequest, TRespon
 
 public interface ISteamFollowersService
 {
-    Task<ulong> GetFollowersAsync(ulong appId, CancellationToken ct = default);
+    Task<long> GetFollowersAsync(long appId, CancellationToken ct = default);
 }
 
 public interface IGameService : IServices<Game, Guid, CreateGameRequest, UpdateGameRequest, GameResponse>
@@ -78,7 +78,7 @@ public interface IGameService : IServices<Game, Guid, CreateGameRequest, UpdateG
     /// </summary>
     /// <param name="appId"></param>
     /// <returns></returns>
-    Task<GameResponse?> GetByAppIdAsync(ulong appId);
+    Task<GameResponse?> GetByAppIdAsync(long appId);
     Task<IEnumerable<GameResponse>> GetByGenreAsync(string genre);
     Task<IEnumerable<GameResponse>> GetRecentGamesAsync(int days = 7);
     Task<IEnumerable<GameResponse>> GetPopularGamesAsync(int count = 10);
@@ -88,7 +88,7 @@ public interface IGameService : IServices<Game, Guid, CreateGameRequest, UpdateG
         string? searchTerm = null,
         string? genre = null,
         string? platform = null);
-    Task<bool> ExistsByAppIdAsync(ulong appId);
+    Task<bool> ExistsByAppIdAsync(long appId);
 
     Task<IEnumerable<GameResponse>> GetReleasesAsync(string month = "2025-11", string? platform = null, string? genre = null);
     Task<CalendarResponse> GetCalendarAsync(string month = "2025-11");

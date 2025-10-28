@@ -56,7 +56,7 @@ public class AnalyticsController : ControllerBase
         return Ok(dynamics);
     }
 
-    // 🔧 НОВЫЙ ЭНДПОИНТ: Специально для последних 3 месяцев (явно по ТЗ)
+    // Специально для последних 3 месяцев (явно по ТЗ)
     [HttpGet("dynamics/last-three-months")]
     [AllowAnonymous]
     public async Task<ActionResult<GenreDynamicsResultResponse>> GetLastThreeMonthsDynamics()

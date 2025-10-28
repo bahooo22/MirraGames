@@ -260,7 +260,7 @@ public class SteamFollowersService : ISteamFollowersService, IAsyncDisposable, I
 {
     private readonly ILogger<SteamFollowersService> _logger;
     private readonly SemaphoreSlim _semaphore = new(2, 2);
-    private readonly Dictionary<ulong, (DateTime fetched, ulong followers)> _cache = new();
+    private readonly Dictionary<long, (DateTime fetched, long followers)> _cache = new();
 
     private IPlaywright? _playwright;
     private IBrowser? _browser;
@@ -295,7 +295,7 @@ public class SteamFollowersService : ISteamFollowersService, IAsyncDisposable, I
         _page = await _context.NewPageAsync();
     }
 
-    public async Task<ulong> GetFollowersAsync(ulong appId, CancellationToken ct = default)
+    public async Task<long> GetFollowersAsync(long appId, CancellationToken ct = default)
     {
         if (_page == null)
             await InitializeAsync();
@@ -325,7 +325,7 @@ public class SteamFollowersService : ISteamFollowersService, IAsyncDisposable, I
                 var normalized = membersText.Trim().Replace("\u00A0", "").Replace(" ", "");
                 _logger.LogInformation("Normalized text for AppId={AppId}: '{Text}'", appId, normalized);
 
-                if (ulong.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out var followers))
+                if (long.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out var followers))
                 {
                     _cache[appId] = (DateTime.UtcNow, followers);
                     _logger.LogInformation("✔ Parsed {Followers} followers for AppId={AppId}", followers, appId);
@@ -334,7 +334,7 @@ public class SteamFollowersService : ISteamFollowersService, IAsyncDisposable, I
                 else
                 {
                     var digits = Regex.Match(normalized, @"\d+").Value;
-                    if (ulong.TryParse(digits, out followers))
+                    if (long.TryParse(digits, out followers))
                     {
                         _cache[appId] = (DateTime.UtcNow, followers);
                         _logger.LogInformation("✔ Parsed {Followers} followers for AppId={AppId}", followers, appId);
@@ -524,7 +524,7 @@ public class GameService(
     /// </summary>
     /// <param name="appId"></param>
     /// <returns></returns>
-    public async Task<GameResponse?> GetByAppIdAsync(ulong appId)
+    public async Task<GameResponse?> GetByAppIdAsync(long appId)
     {
         try
         {
@@ -632,7 +632,7 @@ public class GameService(
         }
     }
 
-    public async Task<bool> ExistsByAppIdAsync(ulong appId)
+    public async Task<bool> ExistsByAppIdAsync(long appId)
     {
         try
         {
@@ -688,7 +688,7 @@ public class AnalyticsService : IAnalyticsService
         var monthList = monthsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries)
                                  .Select(m => m.Trim())
                                  .OrderBy(m => m)
-                                 .ToList();
+                                 .ToList<string>();
 
         // Если месяцев не указано, используем последние 3 месяца как в ТЗ
         if (monthList.Count == 0)
@@ -733,7 +733,7 @@ public class AnalyticsService : IAnalyticsService
             {
                 var monthData = g.Where(x => x.Month == m).ToList();
                 return monthData.Any()
-                    ? (int)Math.Round(monthData.Average(x => x.AvgFollowers))
+                    ? Math.Round(monthData.Average(x => x.AvgFollowers))
                     : 0;
             }).ToList()
         }).ToList();
@@ -745,7 +745,7 @@ public class AnalyticsService : IAnalyticsService
             {
                 Genre = genre,
                 Counts = monthList.Select(_ => 0).ToList(),
-                AvgFollowers = monthList.Select(_ => 0).ToList()
+                AvgFollowers = monthList.Select(_ => 0.0).ToList()
             });
         }
 
@@ -958,7 +958,7 @@ public class SteamService : ISteamService
                         var appIdString = dataDsAppid.Split(',')[0];
 
                         // Конвертируем string в ulong
-                        if (ulong.TryParse(appIdString, out ulong appId))
+                        if (long.TryParse(appIdString, out long appId))
                         {
                             results.Add(new SteamSearchResult
                             {
@@ -1092,13 +1092,13 @@ public class SteamService : ISteamService
     /// <param name="appId"></param>
     /// <param name="releaseDate"></param>
     /// <returns></returns>
-    private async Task<Game?> GetGameDetailsAsync(ulong appId, DateTime? releaseDate)
+    private async Task<Game?> GetGameDetailsAsync(long appId, DateTime? releaseDate)
     {
         var detailsUrl = $"https://store.steampowered.com/api/appdetails?appids={appId}";
         try
         {
             var json = await _httpClient.GetStringAsync(detailsUrl);
-            var detailsDict = JsonSerializer.Deserialize<Dictionary<ulong, AppDetails>>(json);
+            var detailsDict = JsonSerializer.Deserialize<Dictionary<long, AppDetails>>(json);
             if (detailsDict == null || !detailsDict.TryGetValue(appId, out var appDetails) || !appDetails.success)
                 return null;
 
@@ -1403,7 +1403,7 @@ public class SteamSyncService : ISteamSyncService
         }
         int successCount = 0;
         int errorCount = 0;
-        var failedGames = new List<(ulong AppId, string Error)>();
+        var failedGames = new List<(long AppId, string Error)>();
 
         foreach (var game in gameList)
         {
